@@ -1,0 +1,190 @@
+version: '3.8'
+
+services:
+  # OpenSesame Predictor FastAPI Application
+  opensesame-predictor:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: opensesame-predictor
+    ports:
+      - "8000:8000"
+    environment:
+      # Application Configuration
+      - OPENSESAME_ENVIRONMENT=production
+      - OPENSESAME_DEBUG=false
+      - OPENSESAME_API_HOST=0.0.0.0
+      - OPENSESAME_API_PORT=8000
+      
+      # Database Configuration
+      - OPENSESAME_DATABASE_URL=sqlite:///./database/opensesame.db
+      
+      # Cache Configuration
+      - OPENSESAME_CACHE_TTL_SECONDS=3600
+      - OPENSESAME_OPENAPI_CACHE_TTL=3600
+      
+      # ML Model Configuration
+      - OPENSESAME_MAX_MODEL_MEMORY_MB=512
+      - OPENSESAME_PREDICTION_TIMEOUT_SECONDS=30
+      
+      # LLM Configuration (placeholder values)
+      - OPENSESAME_LLM_PROVIDER=placeholder
+      - OPENSESAME_LLM_MODEL=gpt-3.5-turbo
+      - OPENSESAME_LLM_MAX_TOKENS=1000
+      
+      # Security Configuration
+      - OPENSESAME_ENABLE_GUARDRAILS=true
+      - OPENSESAME_MAX_PROMPT_LENGTH=4096
+      
+      # Performance Configuration
+      - OPENSESAME_WORKER_COUNT=2
+      - OPENSESAME_MAX_CONCURRENT_REQUESTS=100
+      - OPENSESAME_REQUEST_TIMEOUT_SECONDS=60
+    volumes:
+      # Persistent database storage
+      - database_volume:/app/database
+      # Optional: Mount logs directory
+      - logs_volume:/app/logs
+      # Optional: Mount data directory for training data
+      - ./data:/app/data:ro
+    networks:
+      - opensesame_network
+    depends_on:
+      - redis
+    restart: unless-stopped
+    # Resource constraints (2 CPU cores, 4GB memory)
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 4G
+        reservations:
+          cpus: '1.0'
+          memory: 2G
+    # Health check
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  # Redis for advanced caching (optional)
+  redis:
+    image: redis:7-alpine
+    container_name: opensesame-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - opensesame_network
+    restart: unless-stopped
+    # Redis configuration
+    command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  # Nginx reverse proxy for production (optional)
+  nginx:
+    image: nginx:alpine
+    container_name: opensesame-nginx
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/ssl:/etc/nginx/ssl:ro
+    networks:
+      - opensesame_network
+    depends_on:
+      - opensesame-predictor
+    restart: unless-stopped
+    profiles:
+      - production
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256M
+
+  # Prometheus for metrics collection (optional)
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: opensesame-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    networks:
+      - opensesame_network
+    restart: unless-stopped
+    profiles:
+      - monitoring
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+
+  # Grafana for monitoring dashboards (optional)
+  grafana:
+    image: grafana/grafana:latest
+    container_name: opensesame-grafana
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    networks:
+      - opensesame_network
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    restart: unless-stopped
+    profiles:
+      - monitoring
+    depends_on:
+      - prometheus
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256M
+
+# Named volumes for data persistence
+volumes:
+  database_volume:
+    driver: local
+  redis_data:
+    driver: local
+  logs_volume:
+    driver: local
+  prometheus_data:
+    driver: local
+  grafana_data:
+    driver: local
+
+# Custom network for service communication
+networks:
+  opensesame_network:
+    driver: bridge
+
+# Environment-specific overrides
+# Development: docker-compose up
+# Production: docker-compose --profile production up
+# Monitoring: docker-compose --profile monitoring up
