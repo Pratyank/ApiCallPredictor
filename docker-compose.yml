@@ -9,6 +9,8 @@ services:
     container_name: opensesame-predictor
     ports:
       - "8000:8000"
+    env_file:
+      - .env
     environment:
       # Application Configuration
       - OPENSESAME_ENVIRONMENT=production
@@ -35,6 +37,10 @@ services:
       # Security Configuration
       - OPENSESAME_ENABLE_GUARDRAILS=true
       - OPENSESAME_MAX_PROMPT_LENGTH=4096
+      
+      # AI Layer Configuration (Phase 2)
+      - ANTHROPIC_API_KEY=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
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
       
       # Performance Configuration
       - OPENSESAME_WORKER_COUNT=2

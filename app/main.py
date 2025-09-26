@@ -2,8 +2,9 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from typing import List, Dict, Any, Optional
 import logging
+from datetime import datetime
 from app.config import get_settings
-from app.models.predictor import PredictionEngine
+from app.models.ai_layer import get_ai_layer
 from app.utils.guardrails import SafetyValidator
 import json
 
@@ -24,7 +25,6 @@ app = FastAPI(
 settings = get_settings()
 
 # Initialize components
-prediction_engine = PredictionEngine()
 safety_validator = SafetyValidator()
 
 class PredictionRequest(BaseModel):
@@ -74,13 +74,31 @@ async def predict_api_calls(request: PredictionRequest):
         # Log request (without sensitive data)
         logger.info(f"Processing prediction request with prompt length: {len(request.prompt)}")
         
-        # Generate predictions using the prediction engine
-        result = await prediction_engine.predict(
+        # Generate predictions using the new AI layer
+        ai_layer = await get_ai_layer()
+        
+        # Generate predictions with enhanced AI capabilities
+        predictions = await ai_layer.generate_predictions(
             prompt=request.prompt,
             history=request.history,
-            max_predictions=request.max_predictions,
+            k=request.max_predictions,
             temperature=request.temperature
         )
+        
+        # Extract confidence scores
+        confidence_scores = [pred.get('confidence', 0.0) for pred in predictions]
+        
+        # Calculate processing time (approximated from predictions)
+        processing_time_ms = predictions[0].get('processing_time_ms', 0.0) if predictions else 0.0
+        
+        result = {
+            'predictions': predictions,
+            'confidence_scores': confidence_scores,
+            'processing_time_ms': processing_time_ms,
+            'model_version': 'v2.0-ai-layer',
+            'timestamp': datetime.now().isoformat(),
+            'ai_provider': predictions[0].get('ai_provider', 'unknown') if predictions else 'unknown'
+        }
         
         return PredictionResponse(
             predictions=result["predictions"],
@@ -101,11 +119,17 @@ async def predict_api_calls(request: PredictionRequest):
 async def get_metrics():
     """Get system metrics and performance stats"""
     try:
-        metrics = await prediction_engine.get_metrics()
+        ai_layer = await get_ai_layer()
+        ai_metrics = await ai_layer.get_status()
+        
+        # Get cache stats from spec parser
+        cache_stats = await ai_layer.spec_parser.get_cache_stats()
+        
         return {
-            "system_metrics": metrics,
-            "cache_stats": settings.get_cache_stats(),
-            "uptime": "placeholder_uptime"
+            "ai_layer_metrics": ai_metrics,
+            "cache_stats": cache_stats,
+            "uptime": "placeholder_uptime",
+            "version": "v2.0-ai-layer"
         }
     except Exception as e:
         logger.error(f"Metrics retrieval error: {str(e)}")

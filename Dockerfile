@@ -1,6 +1,6 @@
 # Multi-stage build for OpenSesame Predictor FastAPI application
 # Stage 1: Build stage with all dependencies
-FROM python:3.12.3-slim as builder
+FROM python:3.12.3-slim AS builder
 # Set environment variables
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -26,7 +26,7 @@ RUN pip install --upgrade pip setuptools wheel && \
     pip install -r requirements.txt
 
 # Stage 2: Runtime stage with minimal footprint
-FROM python:3.12.3-slim as runtime
+FROM python:3.12.3-slim AS runtime
 
 # Set environment variables
 ENV PYTHONUNBUFFERED=1 \
@@ -55,6 +55,7 @@ WORKDIR /app
 # Copy application code
 COPY app/ ./app/
 COPY data/ ./data/
+COPY .env ./
 
 # Create necessary directories and set permissions
 RUN mkdir -p /app/data/training_data /app/tests /app/logs && \

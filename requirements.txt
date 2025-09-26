@@ -49,3 +49,12 @@ mypy==1.7.1
 
 # Optional: YAML support for OpenAPI specs
 PyYAML==6.0.1
+
+# AI Layer Dependencies (Phase 2)
+anthropic==0.34.2
+openai==1.44.1
+sentence-transformers==3.2.0
+
+# Additional dependencies for AI Layer
+torch>=2.0.0  # Required by sentence-transformers
+transformers>=4.21.0  # Required by sentence-transformers

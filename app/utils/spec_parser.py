@@ -6,6 +6,7 @@ from typing import Dict, List, Any, Optional
 import hashlib
 import logging
 import aiohttp
+import os
 
 from app.config import get_settings, db_manager
 
@@ -15,20 +16,27 @@ class OpenAPISpecParser:
     """
     OpenAPI specification fetching and parsing utility with caching capabilities
     Implements 1-hour TTL caching for API specifications using SQLite
+    Enhanced with endpoint extraction and storage in data/cache.db
     """
     
     def __init__(self):
         self.settings = get_settings()
         self.cache_ttl = self.settings.openapi_cache_ttl  # 1 hour default
         self.session = None
+        
+        # Use data/cache.db for all caching operations
+        self.cache_db_path = os.path.join(os.getcwd(), 'data', 'cache.db')
+        os.makedirs(os.path.dirname(self.cache_db_path), exist_ok=True)
+        
         self._init_cache_table()
+        self._init_endpoints_table()
         
         # Performance tracking
         self.cache_hits = 0
         self.cache_misses = 0
         self.total_fetches = 0
         
-        logger.info("Initialized OpenAPI Spec Parser with 1-hour TTL caching")
+        logger.info("Initialized OpenAPI Spec Parser with 1-hour TTL caching and endpoint storage")
     
     async def __aenter__(self):
         """Async context manager entry"""
@@ -46,7 +54,7 @@ class OpenAPISpecParser:
     def _init_cache_table(self):
         """Initialize SQLite table for caching OpenAPI specs"""
         try:
-            conn = sqlite3.connect(self.settings.database_url.replace("sqlite:///", ""))
+            conn = sqlite3.connect(self.cache_db_path)
             cursor = conn.cursor()
             
             cursor.execute('''
@@ -67,6 +75,54 @@ class OpenAPISpecParser:
             
         except Exception as e:
             logger.error(f"Cache table initialization error: {str(e)}")
+    
+    def _init_endpoints_table(self):
+        """Initialize SQLite table for storing parsed endpoints"""
+        try:
+            conn = sqlite3.connect(self.cache_db_path)
+            cursor = conn.cursor()
+            
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS parsed_endpoints (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    endpoint_id TEXT UNIQUE,
+                    method TEXT NOT NULL,
+                    path TEXT NOT NULL,
+                    summary TEXT,
+                    description TEXT,
+                    parameters TEXT,  -- JSON string of parameters
+                    tags TEXT,        -- JSON string of tags
+                    responses TEXT,   -- JSON string of response codes
+                    operation_id TEXT,
+                    spec_url TEXT,
+                    spec_hash TEXT,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            
+            # Create indexes for faster lookups
+            cursor.execute('''
+                CREATE INDEX IF NOT EXISTS idx_endpoints_spec_url 
+                ON parsed_endpoints(spec_url)
+            ''')
+            
+            cursor.execute('''
+                CREATE INDEX IF NOT EXISTS idx_endpoints_method_path 
+                ON parsed_endpoints(method, path)
+            ''')
+            
+            cursor.execute('''
+                CREATE INDEX IF NOT EXISTS idx_endpoints_description 
+                ON parsed_endpoints(description)
+            ''')
+            
+            conn.commit()
+            conn.close()
+            logger.debug("Parsed endpoints table initialized")
+            
+        except Exception as e:
+            logger.error(f"Endpoints table initialization error: {str(e)}")
     
     async def fetch_openapi_spec(
         self, 
@@ -111,10 +167,15 @@ class OpenAPISpecParser:
             # Parse the specification
             parsed_spec = await self._parse_spec_content(spec_content, spec_url)
             
-            # Cache the parsed specification
+            # Cache the parsed specification and extract endpoints
             if parsed_spec:
                 await self._cache_spec(spec_url, parsed_spec, spec_content)
-                logger.info(f"Successfully cached OpenAPI spec: {spec_url}")
+                
+                # Extract and store endpoints
+                endpoints = await self.extract_api_endpoints(parsed_spec)
+                await self._store_parsed_endpoints(endpoints, spec_url, spec_content)
+                
+                logger.info(f"Successfully cached OpenAPI spec and extracted {len(endpoints)} endpoints: {spec_url}")
             
             return parsed_spec
             
@@ -181,7 +242,7 @@ class OpenAPISpecParser:
         """Retrieve cached OpenAPI specification if valid"""
         
         try:
-            conn = sqlite3.connect(self.settings.database_url.replace("sqlite:///", ""))
+            conn = sqlite3.connect(self.cache_db_path)
             cursor = conn.cursor()
             
             # Check for valid cached spec
@@ -232,7 +293,7 @@ class OpenAPISpecParser:
             content_hash = hashlib.md5(raw_content.encode()).hexdigest()
             spec_json = json.dumps(parsed_spec)
             
-            conn = sqlite3.connect(self.settings.database_url.replace("sqlite:///", ""))
+            conn = sqlite3.connect(self.cache_db_path)
             cursor = conn.cursor()
             
             # Insert or replace cached spec
@@ -249,6 +310,159 @@ class OpenAPISpecParser:
             
         except Exception as e:
             logger.warning(f"Spec caching error: {str(e)}")
+    
+    async def _store_parsed_endpoints(
+        self, 
+        endpoints: List[Dict[str, Any]], 
+        spec_url: str,
+        spec_content: str
+    ):
+        """Store parsed endpoints in the cache database"""
+        try:
+            conn = sqlite3.connect(self.cache_db_path)
+            cursor = conn.cursor()
+            
+            # Generate spec hash for consistency
+            spec_hash = hashlib.md5(spec_content.encode()).hexdigest()
+            
+            for endpoint in endpoints:
+                endpoint_id = f"{endpoint['method']}_{endpoint['path']}_{spec_hash[:8]}"
+                
+                cursor.execute('''
+                    INSERT OR REPLACE INTO parsed_endpoints 
+                    (endpoint_id, method, path, summary, description, parameters, tags, responses, operation_id, spec_url, spec_hash, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime("now"))
+                ''', (
+                    endpoint_id,
+                    endpoint['method'],
+                    endpoint['path'],
+                    endpoint.get('summary', ''),
+                    endpoint.get('description', ''),
+                    json.dumps(endpoint.get('parameters', {})),
+                    json.dumps(endpoint.get('tags', [])),
+                    json.dumps(endpoint.get('responses', [])),
+                    endpoint.get('operationId', ''),
+                    spec_url,
+                    spec_hash
+                ))
+            
+            conn.commit()
+            conn.close()
+            
+            logger.info(f"Stored {len(endpoints)} parsed endpoints from {spec_url}")
+            
+        except Exception as e:
+            logger.error(f"Error storing parsed endpoints: {str(e)}")
+    
+    async def get_cached_endpoints(
+        self, 
+        spec_url: str = None, 
+        method: str = None,
+        path_contains: str = None,
+        limit: int = 1000
+    ) -> List[Dict[str, Any]]:
+        """Retrieve cached parsed endpoints with optional filtering"""
+        try:
+            conn = sqlite3.connect(self.cache_db_path)
+            cursor = conn.cursor()
+            
+            query = 'SELECT * FROM parsed_endpoints WHERE 1=1'
+            params = []
+            
+            if spec_url:
+                query += ' AND spec_url = ?'
+                params.append(spec_url)
+            
+            if method:
+                query += ' AND method = ?'
+                params.append(method.upper())
+            
+            if path_contains:
+                query += ' AND path LIKE ?'
+                params.append(f'%{path_contains}%')
+            
+            query += ' ORDER BY created_at DESC LIMIT ?'
+            params.append(limit)
+            
+            cursor.execute(query, params)
+            rows = cursor.fetchall()
+            
+            # Convert to list of dictionaries
+            columns = [description[0] for description in cursor.description]
+            endpoints = []
+            
+            for row in rows:
+                endpoint = dict(zip(columns, row))
+                # Parse JSON fields
+                endpoint['parameters'] = json.loads(endpoint['parameters']) if endpoint['parameters'] else {}
+                endpoint['tags'] = json.loads(endpoint['tags']) if endpoint['tags'] else []
+                endpoint['responses'] = json.loads(endpoint['responses']) if endpoint['responses'] else []
+                endpoints.append(endpoint)
+            
+            conn.close()
+            
+            logger.debug(f"Retrieved {len(endpoints)} cached endpoints")
+            return endpoints
+            
+        except Exception as e:
+            logger.error(f"Error retrieving cached endpoints: {str(e)}")
+            return []
+    
+    async def search_endpoints_by_description(
+        self, 
+        search_terms: List[str], 
+        limit: int = 50
+    ) -> List[Dict[str, Any]]:
+        """Search endpoints by description content for semantic matching"""
+        try:
+            conn = sqlite3.connect(self.cache_db_path)
+            cursor = conn.cursor()
+            
+            # Build search query for description matching
+            search_conditions = []
+            params = []
+            
+            for term in search_terms:
+                search_conditions.append('(description LIKE ? OR summary LIKE ? OR path LIKE ?)')
+                term_pattern = f'%{term}%'
+                params.extend([term_pattern, term_pattern, term_pattern])
+            
+            if not search_conditions:
+                # Return all endpoints if no search terms
+                query = 'SELECT * FROM parsed_endpoints ORDER BY created_at DESC LIMIT ?'
+                params = [limit]
+            else:
+                query = f'''
+                    SELECT * FROM parsed_endpoints 
+                    WHERE {' OR '.join(search_conditions)}
+                    ORDER BY created_at DESC 
+                    LIMIT ?
+                '''
+                params.append(limit)
+            
+            cursor.execute(query, params)
+            rows = cursor.fetchall()
+            
+            # Convert to list of dictionaries
+            columns = [description[0] for description in cursor.description]
+            endpoints = []
+            
+            for row in rows:
+                endpoint = dict(zip(columns, row))
+                # Parse JSON fields
+                endpoint['parameters'] = json.loads(endpoint['parameters']) if endpoint['parameters'] else {}
+                endpoint['tags'] = json.loads(endpoint['tags']) if endpoint['tags'] else []
+                endpoint['responses'] = json.loads(endpoint['responses']) if endpoint['responses'] else []
+                endpoints.append(endpoint)
+            
+            conn.close()
+            
+            logger.debug(f"Found {len(endpoints)} endpoints matching search terms")
+            return endpoints
+            
+        except Exception as e:
+            logger.error(f"Error searching endpoints: {str(e)}")
+            return []
     
     async def extract_api_endpoints(self, spec: Dict[str, Any]) -> List[Dict[str, Any]]:
         """Extract API endpoints from OpenAPI specification"""
@@ -320,7 +534,7 @@ class OpenAPISpecParser:
         """Get caching performance statistics"""
         
         try:
-            conn = sqlite3.connect(self.settings.database_url.replace("sqlite:///", ""))
+            conn = sqlite3.connect(self.cache_db_path)
             cursor = conn.cursor()
             
             # Get cache statistics
@@ -336,6 +550,10 @@ class OpenAPISpecParser:
             cursor.execute('SELECT SUM(access_count) FROM openapi_cache')
             total_accesses = cursor.fetchone()[0] or 0
             
+            # Get endpoint statistics
+            cursor.execute('SELECT COUNT(*) FROM parsed_endpoints')
+            total_endpoints = cursor.fetchone()[0]
+            
             conn.close()
             
             hit_rate = (self.cache_hits / (self.cache_hits + self.cache_misses)) if (self.cache_hits + self.cache_misses) > 0 else 0
@@ -344,11 +562,13 @@ class OpenAPISpecParser:
                 "total_specs_cached": total_cached,
                 "valid_specs_cached": valid_cached,
                 "expired_specs": total_cached - valid_cached,
+                "total_endpoints_cached": total_endpoints,
                 "cache_hits": self.cache_hits,
                 "cache_misses": self.cache_misses,
                 "hit_rate": hit_rate,
                 "total_accesses": total_accesses,
-                "ttl_seconds": self.cache_ttl
+                "ttl_seconds": self.cache_ttl,
+                "cache_db_path": self.cache_db_path
             }
             
         except Exception as e:
@@ -359,25 +579,30 @@ class OpenAPISpecParser:
         """Clear cached specifications"""
         
         try:
-            conn = sqlite3.connect(self.settings.database_url.replace("sqlite:///", ""))
+            conn = sqlite3.connect(self.cache_db_path)
             cursor = conn.cursor()
             
             if spec_url:
-                # Clear specific spec
+                # Clear specific spec and its endpoints
                 cursor.execute('DELETE FROM openapi_cache WHERE spec_url = ?', (spec_url,))
-                cleared = cursor.rowcount
+                cache_cleared = cursor.rowcount
+                cursor.execute('DELETE FROM parsed_endpoints WHERE spec_url = ?', (spec_url,))
+                endpoints_cleared = cursor.rowcount
                 logger.info(f"Cleared cache for {spec_url}")
             else:
-                # Clear all cached specs
+                # Clear all cached specs and endpoints
                 cursor.execute('DELETE FROM openapi_cache')
-                cleared = cursor.rowcount
-                logger.info("Cleared all cached OpenAPI specs")
+                cache_cleared = cursor.rowcount
+                cursor.execute('DELETE FROM parsed_endpoints')
+                endpoints_cleared = cursor.rowcount
+                logger.info("Cleared all cached OpenAPI specs and endpoints")
             
             conn.commit()
             conn.close()
             
             return {
-                "cleared_count": cleared,
+                "cache_cleared_count": cache_cleared,
+                "endpoints_cleared_count": endpoints_cleared,
                 "status": "success"
             }
             
@@ -389,7 +614,7 @@ class OpenAPISpecParser:
         """Clean up expired cache entries"""
         
         try:
-            conn = sqlite3.connect(self.settings.database_url.replace("sqlite:///", ""))
+            conn = sqlite3.connect(self.cache_db_path)
             cursor = conn.cursor()
             
             # Remove expired entries

@@ -7,18 +7,23 @@ OpenSesame Predictor is a sophisticated FastAPI-based service that uses advanced
 ## 🚀 Features
 
 ### Core Capabilities
-- **Intelligent API Prediction**: Combines LLM reasoning with ML ranking for accurate predictions
+- **Advanced AI Prediction**: Phase 2 AI Layer with Anthropic Claude integration and OpenAI fallback
+- **Semantic Understanding**: Sentence-transformers for intelligent endpoint matching
+- **Context-Aware Generation**: History-based filtering with k+buffer candidate selection
 - **Multi-Modal Architecture**: Hybrid AI/ML approach with confidence scoring
 - **Real-time Processing**: Sub-second response times with intelligent caching
 - **Safety & Security**: Comprehensive input validation and guardrails
 - **Scalable Design**: Docker containerization with resource optimization
 
-### Technical Highlights
+### Technical Highlights (Phase 2)
+- **AI Layer**: Anthropic Claude 3 Haiku integration with OpenAI GPT-3.5 fallback
+- **Semantic Similarity**: sentence-transformers (all-MiniLM-L6-v2) for endpoint matching
+- **Smart Caching**: Enhanced SQLite caching with parsed endpoint storage in data/cache.db
+- **Context Processing**: Recent event analysis with workflow pattern recognition
+- **Candidate Generation**: k+buffer logic for improved prediction quality
 - **FastAPI Framework**: High-performance async API with automatic documentation
-- **SQLite Caching**: 1-hour TTL caching system for OpenAPI specifications
 - **Feature Engineering**: Advanced text analysis and pattern recognition
-- **ML Ranking System**: Context-aware prediction scoring and ranking
-- **OpenAPI Integration**: Automatic spec parsing and endpoint extraction
+- **OpenAPI Integration**: Automatic spec parsing and endpoint extraction with semantic indexing
 
 ## 📋 Project Structure
 
@@ -62,15 +67,34 @@ source venv/bin/activate  # or `venv\Scripts\activate` on Windows
 pip install -r requirements.txt
 ```
 
-3. **Run Development Server**:
+3. **Configure AI API Keys** (Phase 2):
+```bash
+# Required: Set Anthropic API key for primary AI functionality
+export ANTHROPIC_API_KEY="your-anthropic-api-key-here"
+
+# Optional: Set OpenAI API key for enhanced fallback
+export OPENAI_API_KEY="your-openai-api-key-here"
+```
+
+**Getting API Keys:**
+- **Anthropic**: Visit [console.anthropic.com](https://console.anthropic.com) to get your Claude API key
+- **OpenAI**: Visit [platform.openai.com](https://platform.openai.com/api-keys) to get your OpenAI API key
+
+**Note**: The system will work with just the Anthropic key, or even without any keys (using rule-based fallback), but Anthropic key is recommended for best AI performance.
+
+4. **Run Development Server**:
 ```bash
 uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
 ### Docker Deployment
 
-1. **Build and Run**:
+1. **Build and Run** (with AI API keys):
 ```bash
+# Create .env file with your API keys
+echo "ANTHROPIC_API_KEY=your-anthropic-api-key-here" > .env
+echo "OPENAI_API_KEY=your-openai-api-key-here" >> .env
+
 docker-compose up --build
 ```
 
@@ -135,9 +159,15 @@ Content-Type: application/json
 | `OPENSESAME_API_PORT` | `8000` | API server port |
 | `OPENSESAME_DATABASE_URL` | `sqlite:///./opensesame.db` | Database connection |
 | `OPENSESAME_CACHE_TTL_SECONDS` | `3600` | Cache TTL (1 hour) |
-| `OPENSESAME_LLM_PROVIDER` | `placeholder` | LLM provider (OpenAI, Anthropic) |
 | `OPENSESAME_MAX_PROMPT_LENGTH` | `4096` | Maximum prompt length |
 | `OPENSESAME_ENABLE_GUARDRAILS` | `true` | Enable safety validation |
+
+### AI Layer Configuration (Phase 2)
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ANTHROPIC_API_KEY` | *(required)* | Anthropic Claude API key for primary AI predictions |
+| `OPENAI_API_KEY` | *(optional)* | OpenAI API key for fallback predictions |
 
 ### ML Model Settings
 - **Feature Vector Size**: 256 dimensions
@@ -147,31 +177,50 @@ Content-Type: application/json
 
 ## 🧠 Architecture Overview
 
-### Prediction Pipeline
+### Phase 2 AI Layer Pipeline
 1. **Input Validation**: Safety checks and guardrails
-2. **Feature Extraction**: NLP processing and pattern recognition
-3. **LLM Generation**: Context-aware API call candidates
-4. **ML Ranking**: Confidence scoring and relevance ranking
-5. **Result Synthesis**: Formatted predictions with metadata
+2. **Context Analysis**: Recent event extraction and normalization
+3. **Endpoint Retrieval**: Cached endpoint access from data/cache.db
+4. **Smart Filtering**: 
+   - Pattern-based filtering using recent API call history
+   - Semantic similarity filtering using sentence-transformers
+5. **AI Generation**: 
+   - Anthropic Claude 3 Haiku for primary predictions
+   - OpenAI GPT-3.5 Turbo fallback with function calling
+   - Rule-based fallback for offline operation
+6. **Semantic Enhancement**: Confidence score enhancement using embedding similarity
+7. **Candidate Selection**: Top-k selection with uniqueness guarantees
+8. **Result Synthesis**: Formatted predictions with comprehensive metadata
 
-### Caching Strategy
-- **L1 Cache**: In-memory TTL cache for frequent requests
-- **L2 Cache**: SQLite persistent cache for OpenAPI specs
-- **Cache Invalidation**: Intelligent TTL-based expiration
+### Enhanced Caching Strategy
+- **Endpoint Cache**: Parsed OpenAPI endpoints stored in data/cache.db with semantic indexing
+- **Specification Cache**: 1-hour TTL caching for raw OpenAPI specs
+- **Embedding Cache**: Computed embeddings for frequent endpoints (future enhancement)
+- **Cache Invalidation**: Intelligent TTL-based expiration with cleanup utilities
+
+### AI Layer Features
+- **Anthropic Integration**: Claude 3 Haiku for cost-effective, fast predictions
+- **OpenAI Fallback**: GPT-3.5 Turbo with structured function calling
+- **Semantic Matching**: Context-aware endpoint filtering using sentence similarity
+- **History Analysis**: Recent event pattern recognition and workflow understanding
+- **Multi-Provider Support**: Automatic fallback between AI providers
+- **Offline Resilience**: Rule-based predictions when AI services unavailable
 
 ### Security Features
 - **Input Sanitization**: SQL injection and XSS prevention
 - **Rate Limiting**: Per-user request throttling
 - **Content Filtering**: Inappropriate content detection
 - **Parameter Validation**: Type checking and bounds enforcement
+- **API Key Security**: Environment-based credential management
 
 ## 📊 Performance Targets
 
-### Response Times
-- **P50 Response Time**: < 500ms
-- **P95 Response Time**: < 1000ms
-- **AI Layer**: < 500ms per request
-- **ML Ranking**: < 100ms per prediction set
+### Response Times (Phase 2)
+- **P50 Response Time**: < 800ms (including AI processing)
+- **P95 Response Time**: < 1500ms 
+- **AI Layer**: < 600ms per request (Anthropic Claude)
+- **Semantic Processing**: < 200ms per similarity calculation
+- **Endpoint Filtering**: < 100ms per request
 
 ### Throughput
 - **Single Instance**: 10+ RPS sustained
@@ -275,9 +324,10 @@ docker-compose --profile production --profile monitoring up
 5. **Synthetic Training**: Initial training on generated data
 
 ### Extension Points
-- **LLM Integration**: Easy provider switching (OpenAI/Anthropic/Local)
-- **ML Models**: Pluggable ranking algorithms
-- **Cache Backends**: Redis/Memcached integration
+- **AI Providers**: Easy switching between Anthropic, OpenAI, and local models
+- **Semantic Models**: Pluggable sentence-transformer models for different domains
+- **Cache Backends**: Redis/Memcached integration for distributed caching
+- **Embedding Stores**: Vector databases for large-scale semantic search
 - **Auth Systems**: JWT/OAuth2 integration
 - **Monitoring**: OpenTelemetry instrumentation
 
@@ -325,4 +375,169 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 
 ---
 
-**OpenSesame Predictor** - Unlocking API Intelligence with AI 🗝️✨
+## 📝 Phase 2 AI Layer Implementation
+
+### Key Enhancements
+
+**🤖 Advanced AI Integration**
+- **Primary AI**: Anthropic Claude 3 Haiku for fast, accurate predictions
+- **Fallback AI**: OpenAI GPT-3.5 Turbo with structured function calling
+- **Offline Mode**: Rule-based predictions when AI services unavailable
+
+**🎯 Semantic Understanding**
+- **Sentence Transformers**: all-MiniLM-L6-v2 model for endpoint similarity
+- **Context Filtering**: History-aware endpoint selection
+- **Embedding Enhancement**: Confidence scores improved with semantic similarity
+
+**💾 Enhanced Caching**
+- **Endpoint Storage**: Parsed endpoints cached in data/cache.db with full metadata
+- **Search Optimization**: Semantic search capabilities for endpoint discovery
+- **Performance**: Sub-second response times with intelligent caching
+
+**🔄 Intelligent Candidate Generation**
+- **k+buffer Logic**: Generate k+2 candidates for better selection quality
+- **Context Awareness**: Recent API call patterns influence predictions
+- **Workflow Recognition**: Common API usage patterns automatically detected
+
+### API Response Enhancements
+
+Enhanced `/predict` endpoint now returns:
+```json
+{
+  "predictions": [
+    {
+      "api_call": "GET /api/users/{id}",
+      "method": "GET", 
+      "description": "Retrieve user information by ID",
+      "parameters": {"id": "user_id"},
+      "confidence": 0.89,
+      "reasoning": "Natural progression from login to user data retrieval",
+      "rank": 1,
+      "ai_provider": "anthropic",
+      "semantic_similarity": 0.85,
+      "processing_time_ms": 245
+    }
+  ],
+  "confidence_scores": [0.89],
+  "metadata": {
+    "model_version": "v2.0-ai-layer",
+    "ai_provider": "anthropic",
+    "semantic_similarity_enabled": true,
+    "context_events_used": 3,
+    "total_endpoints_considered": 150,
+    "filtered_endpoints_used": 12
+  }
+}
+```
+
+## 🧪 Testing Phase 2 AI Layer
+
+### Manual Testing Steps
+
+1. **Start the Server**:
+```bash
+# With API keys configured
+export ANTHROPIC_API_KEY="your-key-here"
+uvicorn app.main:app --reload --port 8000
+```
+
+2. **Test Basic Functionality**:
+```bash
+curl -X POST "http://localhost:8000/predict" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "prompt": "I need to get user information for authentication",
+    "history": [
+      {"api_call": "/api/auth/login", "method": "POST", "timestamp": "2024-01-01T10:00:00Z"}
+    ],
+    "max_predictions": 3,
+    "temperature": 0.7
+  }'
+```
+
+3. **Expected Response** (with AI enabled):
+```json
+{
+  "predictions": [
+    {
+      "api_call": "GET /api/users/{id}",
+      "method": "GET",
+      "description": "Retrieve user information by ID", 
+      "confidence": 0.85,
+      "reasoning": "Natural progression from login to user data",
+      "rank": 1,
+      "ai_provider": "anthropic",
+      "semantic_similarity_enabled": true
+    }
+  ],
+  "confidence_scores": [0.85],
+  "metadata": {
+    "model_version": "v2.0-ai-layer",
+    "ai_provider": "anthropic"
+  }
+}
+```
+
+4. **Test Semantic Similarity**:
+```bash
+# First, add some OpenAPI specs to the cache
+curl -X POST "http://localhost:8000/predict" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "prompt": "create a new user account",
+    "max_predictions": 3
+  }'
+```
+
+5. **Test History-Based Filtering**:
+```bash
+curl -X POST "http://localhost:8000/predict" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "prompt": "update user profile",
+    "history": [
+      {"api_call": "/api/users/123", "method": "GET"},
+      {"api_call": "/api/users/123/profile", "method": "GET"}
+    ],
+    "max_predictions": 3
+  }'
+```
+
+6. **Check System Status**:
+```bash
+curl "http://localhost:8000/metrics"
+```
+
+Expected metrics should show:
+- `ai_layer_status: "operational"`
+- `anthropic_available: true`
+- `semantic_model_loaded: true`
+- Cache and endpoint statistics
+
+### Testing Without API Keys
+
+The system gracefully falls back to rule-based predictions:
+
+```bash
+# Unset API keys to test fallback
+unset ANTHROPIC_API_KEY
+unset OPENAI_API_KEY
+
+# Restart server and test - should still work with rule-based predictions
+curl -X POST "http://localhost:8000/predict" \
+  -H "Content-Type: application/json" \
+  -d '{"prompt": "get user data", "max_predictions": 2}'
+```
+
+### Validation Checklist
+
+✅ **AI Integration**: Responses include `ai_provider` field  
+✅ **Semantic Similarity**: `semantic_similarity_enabled: true` in metadata  
+✅ **Enhanced Caching**: Endpoints stored in `data/cache.db`  
+✅ **Context Awareness**: History influences predictions  
+✅ **Fallback Handling**: Works without API keys  
+✅ **Performance**: Response times under 1 second  
+
+---
+
+**OpenSesame Predictor v2.0** - Unlocking API Intelligence with Advanced AI 🗝️🤖✨
