@@ -1,0 +1,75 @@
+{
+  "prompts": [
+    "Create a new user account with email validation",
+    "Search for products by category and price range",
+    "Update user profile information and preferences",
+    "Delete user account and all associated data",
+    "Get user authentication status and permissions",
+    "List all available API endpoints with documentation",
+    "Process payment for order with credit card verification",
+    "Send email notification to user with custom template",
+    "Generate report of user activity for the last month",
+    "Backup user data to external storage service",
+    "Validate user input for security vulnerabilities",
+    "Cache frequently accessed data for performance",
+    "Log user actions for audit and compliance",
+    "Synchronize data across multiple database replicas",
+    "Monitor system health and resource utilization"
+  ],
+  "histories": [
+    [],
+    [
+      {
+        "api_call": "/api/auth/login",
+        "method": "POST",
+        "timestamp": "2024-01-01T10:00:00Z"
+      }
+    ],
+    [
+      {
+        "api_call": "/api/users",
+        "method": "GET",
+        "timestamp": "2024-01-01T10:00:00Z"
+      },
+      {
+        "api_call": "/api/users/123",
+        "method": "GET",
+        "timestamp": "2024-01-01T10:01:00Z"
+      }
+    ],
+    [
+      {
+        "api_call": "/api/products",
+        "method": "GET",
+        "timestamp": "2024-01-01T10:00:00Z"
+      },
+      {
+        "api_call": "/api/products/search",
+        "method": "POST",
+        "timestamp": "2024-01-01T10:01:00Z"
+      },
+      {
+        "api_call": "/api/products/456",
+        "method": "GET",
+        "timestamp": "2024-01-01T10:02:00Z"
+      }
+    ]
+  ],
+  "test_configurations": [
+    {
+      "max_predictions": 3,
+      "temperature": 0.7,
+      "use_ml_ranking": true
+    },
+    {
+      "max_predictions": 5,
+      "temperature": 0.5,
+      "use_ml_ranking": true
+    },
+    {
+      "max_predictions": 3,
+      "temperature": 0.9,
+      "use_ml_ranking": false
+    }
+  ]
+}

@@ -1,0 +1,16 @@
+# Minimal dockerignore - include Phase 5 files
+__pycache__/
+*.pyc
+*.pyo
+.git/
+.pytest_cache/
+node_modules/
+.vscode/
+.idea/
+*.log
+.env.local
+.env.development
+.env.test
+.env.production
+.DS_Store
+Thumbs.db

@@ -1,0 +1,253 @@
+{
+  "workflow_name": "stripe_billing_scenarios",
+  "description": "Realistic Stripe billing API workflow patterns for testing /predict endpoint",
+  "version": "1.0",
+  "created_for": "SaaS workflow pattern optimization",
+  "scenarios": [
+    {
+      "id": "stripe_001",
+      "name": "Create Invoice Workflow",
+      "prompt": "create invoice for customer subscription",
+      "history": [
+        {
+          "api_call": "GET /v1/customers/cus_123",
+          "method": "GET",
+          "timestamp": "2024-09-27T10:15:30Z",
+          "response_status": 200,
+          "resource": "customers"
+        },
+        {
+          "api_call": "GET /v1/subscriptions?customer=cus_123",
+          "method": "GET", 
+          "timestamp": "2024-09-27T10:16:45Z",
+          "response_status": 200,
+          "resource": "subscriptions"
+        }
+      ],
+      "expected_predictions": [
+        {
+          "api_call": "POST /v1/invoices",
+          "method": "POST",
+          "description": "Create invoice for customer",
+          "confidence_threshold": 0.8,
+          "workflow_pattern": "browse_edit_save"
+        },
+        {
+          "api_call": "POST /v1/invoice_items",
+          "method": "POST", 
+          "description": "Add items to invoice",
+          "confidence_threshold": 0.7,
+          "workflow_pattern": "browse_edit_save"
+        }
+      ],
+      "feature_vectors": {
+        "last_endpoint_type": "GET",
+        "last_resource": "subscriptions",
+        "time_since_last": 75.0,
+        "session_length": 1.25,
+        "workflow_distance": 0.2,
+        "action_verb_match": 1,
+        "resource_continuity": 0.8
+      }
+    },
+    {
+      "id": "stripe_002", 
+      "name": "Payment Processing Chain",
+      "prompt": "process payment for pending invoice",
+      "history": [
+        {
+          "api_call": "GET /v1/invoices/in_456",
+          "method": "GET",
+          "timestamp": "2024-09-27T10:20:00Z",
+          "response_status": 200,
+          "resource": "invoices"
+        },
+        {
+          "api_call": "GET /v1/payment_methods?customer=cus_123",
+          "method": "GET",
+          "timestamp": "2024-09-27T10:20:30Z", 
+          "response_status": 200,
+          "resource": "payment_methods"
+        }
+      ],
+      "expected_predictions": [
+        {
+          "api_call": "POST /v1/invoices/in_456/pay",
+          "method": "POST",
+          "description": "Pay invoice with payment method",
+          "confidence_threshold": 0.9,
+          "workflow_pattern": "browse_confirm_save"
+        },
+        {
+          "api_call": "POST /v1/payment_intents",
+          "method": "POST",
+          "description": "Create payment intent for invoice",
+          "confidence_threshold": 0.8,
+          "workflow_pattern": "browse_confirm_save"
+        }
+      ],
+      "feature_vectors": {
+        "last_endpoint_type": "GET",
+        "last_resource": "payment_methods",
+        "time_since_last": 30.0,
+        "session_length": 0.5,
+        "workflow_distance": 0.1,
+        "action_verb_match": 1,
+        "resource_continuity": 0.9
+      }
+    },
+    {
+      "id": "stripe_003",
+      "name": "Subscription Management Flow",
+      "prompt": "update subscription plan and billing",
+      "history": [
+        {
+          "api_call": "GET /v1/customers/cus_789/subscriptions",
+          "method": "GET",
+          "timestamp": "2024-09-27T10:25:00Z",
+          "response_status": 200,
+          "resource": "subscriptions"
+        },
+        {
+          "api_call": "GET /v1/plans",
+          "method": "GET",
+          "timestamp": "2024-09-27T10:25:15Z",
+          "response_status": 200,
+          "resource": "plans"
+        },
+        {
+          "api_call": "GET /v1/subscription_schedules?customer=cus_789",
+          "method": "GET",
+          "timestamp": "2024-09-27T10:25:30Z",
+          "response_status": 200,
+          "resource": "subscription_schedules"
+        }
+      ],
+      "expected_predictions": [
+        {
+          "api_call": "POST /v1/subscriptions/sub_123",
+          "method": "POST",
+          "description": "Update subscription with new plan",
+          "confidence_threshold": 0.85,
+          "workflow_pattern": "browse_edit_save"
+        },
+        {
+          "api_call": "POST /v1/subscription_schedules",
+          "method": "POST",
+          "description": "Create subscription schedule for plan change",
+          "confidence_threshold": 0.7,
+          "workflow_pattern": "browse_edit_save"
+        }
+      ],
+      "feature_vectors": {
+        "last_endpoint_type": "GET",
+        "last_resource": "subscription_schedules", 
+        "time_since_last": 15.0,
+        "session_length": 0.5,
+        "workflow_distance": 0.15,
+        "action_verb_match": 1,
+        "resource_continuity": 0.95
+      }
+    },
+    {
+      "id": "stripe_004",
+      "name": "Customer Onboarding",
+      "prompt": "setup new customer with payment method",
+      "history": [],
+      "expected_predictions": [
+        {
+          "api_call": "POST /v1/customers",
+          "method": "POST",
+          "description": "Create new customer",
+          "confidence_threshold": 0.9,
+          "workflow_pattern": "cold_start_create"
+        },
+        {
+          "api_call": "GET /v1/customers",
+          "method": "GET",
+          "description": "List existing customers",
+          "confidence_threshold": 0.6,
+          "workflow_pattern": "cold_start_browse"
+        }
+      ],
+      "feature_vectors": {
+        "last_endpoint_type": "NONE",
+        "last_resource": "none",
+        "time_since_last": -1.0,
+        "session_length": 0.0,
+        "workflow_distance": 0.5,
+        "action_verb_match": 1,
+        "resource_continuity": 0.0
+      }
+    },
+    {
+      "id": "stripe_005",
+      "name": "Refund Processing",
+      "prompt": "issue refund for disputed charge",
+      "history": [
+        {
+          "api_call": "GET /v1/charges/ch_789",
+          "method": "GET",
+          "timestamp": "2024-09-27T10:30:00Z",
+          "response_status": 200,
+          "resource": "charges"
+        },
+        {
+          "api_call": "GET /v1/disputes/dp_456",
+          "method": "GET",
+          "timestamp": "2024-09-27T10:30:45Z",
+          "response_status": 200,
+          "resource": "disputes"
+        }
+      ],
+      "expected_predictions": [
+        {
+          "api_call": "POST /v1/refunds",
+          "method": "POST",
+          "description": "Create refund for charge",
+          "confidence_threshold": 0.95,
+          "workflow_pattern": "browse_confirm_save"
+        },
+        {
+          "api_call": "POST /v1/disputes/dp_456/close",
+          "method": "POST",
+          "description": "Close dispute after refund",
+          "confidence_threshold": 0.8,
+          "workflow_pattern": "browse_confirm_save"
+        }
+      ],
+      "feature_vectors": {
+        "last_endpoint_type": "GET",
+        "last_resource": "disputes",
+        "time_since_last": 45.0,
+        "session_length": 0.75,
+        "workflow_distance": 0.1,
+        "action_verb_match": 1,
+        "resource_continuity": 0.8
+      }
+    }
+  ],
+  "performance_benchmarks": {
+    "cold_start_scenarios": 1,
+    "workflow_continuation_scenarios": 4,
+    "average_history_length": 2.0,
+    "expected_accuracy_threshold": 0.85,
+    "expected_response_time_ms": 150
+  },
+  "test_instructions": {
+    "endpoint": "/predict",
+    "method": "POST",
+    "payload_format": {
+      "prompt": "string",
+      "history": "array_of_objects_optional",
+      "max_predictions": "integer_optional_default_3",
+      "temperature": "float_optional_default_0.7"
+    },
+    "validation_criteria": [
+      "Response time under 200ms",
+      "Confidence scores within expected thresholds",
+      "Workflow pattern recognition accuracy > 80%",
+      "Feature vector calculation correctness"
+    ]
+  }
+}

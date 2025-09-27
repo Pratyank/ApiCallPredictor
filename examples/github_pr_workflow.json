@@ -1,0 +1,321 @@
+{
+  "workflow_name": "github_pr_management",
+  "description": "GitHub Pull Request management workflow patterns for testing /predict endpoint",
+  "version": "1.0", 
+  "created_for": "Developer workflow pattern optimization",
+  "scenarios": [
+    {
+      "id": "github_001",
+      "name": "Create Pull Request Flow",
+      "prompt": "create pull request for feature branch",
+      "history": [
+        {
+          "api_call": "GET /repos/owner/repo",
+          "method": "GET",
+          "timestamp": "2024-09-27T10:10:00Z",
+          "response_status": 200,
+          "resource": "repos"
+        },
+        {
+          "api_call": "GET /repos/owner/repo/branches",
+          "method": "GET",
+          "timestamp": "2024-09-27T10:10:30Z",
+          "response_status": 200,
+          "resource": "branches"
+        },
+        {
+          "api_call": "GET /repos/owner/repo/commits?sha=feature-branch",
+          "method": "GET",
+          "timestamp": "2024-09-27T10:11:00Z",
+          "response_status": 200,
+          "resource": "commits"
+        }
+      ],
+      "expected_predictions": [
+        {
+          "api_call": "POST /repos/owner/repo/pulls",
+          "method": "POST",
+          "description": "Create pull request from feature branch",
+          "confidence_threshold": 0.9,
+          "workflow_pattern": "browse_edit_save"
+        },
+        {
+          "api_call": "GET /repos/owner/repo/pulls",
+          "method": "GET",
+          "description": "List existing pull requests",
+          "confidence_threshold": 0.7,
+          "workflow_pattern": "browse_edit_save"
+        }
+      ],
+      "feature_vectors": {
+        "last_endpoint_type": "GET",
+        "last_resource": "commits",
+        "time_since_last": 30.0,
+        "session_length": 1.0,
+        "workflow_distance": 0.15,
+        "action_verb_match": 1,
+        "resource_continuity": 0.9
+      }
+    },
+    {
+      "id": "github_002",
+      "name": "Merge Pull Request Workflow",
+      "prompt": "merge pull request after review approval",
+      "history": [
+        {
+          "api_call": "GET /repos/owner/repo/pulls/123",
+          "method": "GET",
+          "timestamp": "2024-09-27T10:15:00Z",
+          "response_status": 200,
+          "resource": "pulls"
+        },
+        {
+          "api_call": "GET /repos/owner/repo/pulls/123/reviews",
+          "method": "GET",
+          "timestamp": "2024-09-27T10:15:30Z",
+          "response_status": 200,
+          "resource": "reviews"
+        },
+        {
+          "api_call": "GET /repos/owner/repo/pulls/123/files",
+          "method": "GET",
+          "timestamp": "2024-09-27T10:16:00Z",
+          "response_status": 200,
+          "resource": "files"
+        }
+      ],
+      "expected_predictions": [
+        {
+          "api_call": "PUT /repos/owner/repo/pulls/123/merge",
+          "method": "PUT",
+          "description": "Merge pull request",
+          "confidence_threshold": 0.95,
+          "workflow_pattern": "browse_confirm_save"
+        },
+        {
+          "api_call": "POST /repos/owner/repo/pulls/123/reviews",
+          "method": "POST",
+          "description": "Add final review before merge",
+          "confidence_threshold": 0.8,
+          "workflow_pattern": "browse_confirm_save"
+        }
+      ],
+      "feature_vectors": {
+        "last_endpoint_type": "GET",
+        "last_resource": "files",
+        "time_since_last": 30.0,
+        "session_length": 1.0,
+        "workflow_distance": 0.1,
+        "action_verb_match": 1,
+        "resource_continuity": 0.95
+      }
+    },
+    {
+      "id": "github_003",
+      "name": "Code Review Process",
+      "prompt": "review code changes and leave comments",
+      "history": [
+        {
+          "api_call": "GET /repos/owner/repo/pulls/456",
+          "method": "GET",
+          "timestamp": "2024-09-27T10:20:00Z",
+          "response_status": 200,
+          "resource": "pulls"
+        },
+        {
+          "api_call": "GET /repos/owner/repo/pulls/456/files",
+          "method": "GET",
+          "timestamp": "2024-09-27T10:20:15Z",
+          "response_status": 200,
+          "resource": "files"
+        }
+      ],
+      "expected_predictions": [
+        {
+          "api_call": "POST /repos/owner/repo/pulls/456/reviews",
+          "method": "POST",
+          "description": "Submit code review with comments",
+          "confidence_threshold": 0.9,
+          "workflow_pattern": "browse_edit_save"
+        },
+        {
+          "api_call": "POST /repos/owner/repo/pulls/456/comments",
+          "method": "POST",
+          "description": "Add line-specific comments",
+          "confidence_threshold": 0.85,
+          "workflow_pattern": "browse_edit_save"
+        }
+      ],
+      "feature_vectors": {
+        "last_endpoint_type": "GET",
+        "last_resource": "files",
+        "time_since_last": 15.0,
+        "session_length": 0.33,
+        "workflow_distance": 0.2,
+        "action_verb_match": 1,
+        "resource_continuity": 0.8
+      }
+    },
+    {
+      "id": "github_004",
+      "name": "Issue Management Flow",
+      "prompt": "create issue for bug report",
+      "history": [
+        {
+          "api_call": "GET /repos/owner/repo/issues",
+          "method": "GET",
+          "timestamp": "2024-09-27T10:25:00Z",
+          "response_status": 200,
+          "resource": "issues"
+        },
+        {
+          "api_call": "GET /repos/owner/repo/labels",
+          "method": "GET",
+          "timestamp": "2024-09-27T10:25:20Z",
+          "response_status": 200,
+          "resource": "labels"
+        }
+      ],
+      "expected_predictions": [
+        {
+          "api_call": "POST /repos/owner/repo/issues",
+          "method": "POST",
+          "description": "Create new issue with bug report",
+          "confidence_threshold": 0.9,
+          "workflow_pattern": "browse_edit_save"
+        },
+        {
+          "api_call": "GET /repos/owner/repo/milestones",
+          "method": "GET",
+          "description": "Check milestones for issue assignment",
+          "confidence_threshold": 0.7,
+          "workflow_pattern": "browse_edit_save"
+        }
+      ],
+      "feature_vectors": {
+        "last_endpoint_type": "GET",
+        "last_resource": "labels",
+        "time_since_last": 20.0,
+        "session_length": 0.33,
+        "workflow_distance": 0.25,
+        "action_verb_match": 1,
+        "resource_continuity": 0.7
+      }
+    },
+    {
+      "id": "github_005",
+      "name": "Repository Exploration",
+      "prompt": "explore repository structure and recent activity",
+      "history": [],
+      "expected_predictions": [
+        {
+          "api_call": "GET /repos/owner/repo",
+          "method": "GET",
+          "description": "Get repository information",
+          "confidence_threshold": 0.8,
+          "workflow_pattern": "cold_start_browse"
+        },
+        {
+          "api_call": "GET /repos/owner/repo/contents",
+          "method": "GET",
+          "description": "Browse repository contents",
+          "confidence_threshold": 0.7,
+          "workflow_pattern": "cold_start_browse"
+        },
+        {
+          "api_call": "GET /repos/owner/repo/commits",
+          "method": "GET",
+          "description": "View recent commits",
+          "confidence_threshold": 0.6,
+          "workflow_pattern": "cold_start_browse"
+        }
+      ],
+      "feature_vectors": {
+        "last_endpoint_type": "NONE",
+        "last_resource": "none",
+        "time_since_last": -1.0,
+        "session_length": 0.0,
+        "workflow_distance": 0.5,
+        "action_verb_match": 1,
+        "resource_continuity": 0.0
+      }
+    },
+    {
+      "id": "github_006",
+      "name": "Release Management",
+      "prompt": "create release for version tag",
+      "history": [
+        {
+          "api_call": "GET /repos/owner/repo/tags",
+          "method": "GET",
+          "timestamp": "2024-09-27T10:30:00Z",
+          "response_status": 200,
+          "resource": "tags"
+        },
+        {
+          "api_call": "GET /repos/owner/repo/releases",
+          "method": "GET",
+          "timestamp": "2024-09-27T10:30:30Z",
+          "response_status": 200,
+          "resource": "releases"
+        },
+        {
+          "api_call": "GET /repos/owner/repo/compare/v1.0.0...v1.1.0",
+          "method": "GET",
+          "timestamp": "2024-09-27T10:31:00Z",
+          "response_status": 200,
+          "resource": "compare"
+        }
+      ],
+      "expected_predictions": [
+        {
+          "api_call": "POST /repos/owner/repo/releases",
+          "method": "POST",
+          "description": "Create release from tag",
+          "confidence_threshold": 0.95,
+          "workflow_pattern": "browse_confirm_save"
+        },
+        {
+          "api_call": "POST /repos/owner/repo/releases/123/assets",
+          "method": "POST",
+          "description": "Upload release assets",
+          "confidence_threshold": 0.8,
+          "workflow_pattern": "browse_confirm_save"
+        }
+      ],
+      "feature_vectors": {
+        "last_endpoint_type": "GET",
+        "last_resource": "compare",
+        "time_since_last": 30.0,
+        "session_length": 1.0,
+        "workflow_distance": 0.1,
+        "action_verb_match": 1,
+        "resource_continuity": 0.9
+      }
+    }
+  ],
+  "performance_benchmarks": {
+    "cold_start_scenarios": 1,
+    "workflow_continuation_scenarios": 5,
+    "average_history_length": 2.17,
+    "expected_accuracy_threshold": 0.87,
+    "expected_response_time_ms": 140
+  },
+  "test_instructions": {
+    "endpoint": "/predict",
+    "method": "POST",
+    "payload_format": {
+      "prompt": "string",
+      "history": "array_of_objects_optional",
+      "max_predictions": "integer_optional_default_3",
+      "temperature": "float_optional_default_0.7"
+    },
+    "validation_criteria": [
+      "Response time under 180ms",
+      "Confidence scores within expected thresholds", 
+      "Workflow pattern recognition accuracy > 85%",
+      "Feature vector calculation correctness",
+      "Proper handling of GitHub API resource relationships"
+    ]
+  }
+}

@@ -2,8 +2,10 @@ import asyncio
 import logging
 import json
 import os
+import sqlite3
+import hashlib
 from typing import List, Dict, Any, Optional
-from datetime import datetime
+from datetime import datetime, timedelta
 import numpy as np
 
 from app.config import get_settings
@@ -29,9 +31,14 @@ class AiLayer:
         self.anthropic_client = None
         self.openai_client = None
         
-        # Initialize sentence transformer model
+        # Initialize sentence transformer model with caching
         self.sentence_model = None
         self.model_loaded = False
+        
+        # Embedding cache for performance optimization
+        self.cache_db_path = os.path.join(os.getcwd(), 'data', 'cache.db')
+        os.makedirs(os.path.dirname(self.cache_db_path), exist_ok=True)
+        self._init_embedding_cache()
         
         # Initialize spec parser for endpoint retrieval
         self.spec_parser = OpenAPISpecParser()
@@ -110,15 +117,46 @@ class AiLayer:
             except Exception as e:
                 logger.warning(f"Failed to initialize OpenAI client: {str(e)}")
     
+    def _init_embedding_cache(self):
+        """Initialize embedding cache database"""
+        try:
+            conn = sqlite3.connect(self.cache_db_path)
+            cursor = conn.cursor()
+            
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS embedding_cache (
+                    text_hash TEXT PRIMARY KEY,
+                    embedding_data BLOB NOT NULL,
+                    model_name TEXT NOT NULL,
+                    cached_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    access_count INTEGER DEFAULT 0
+                )
+            ''')
+            
+            # Create index for faster lookups
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_embedding_model ON embedding_cache(model_name)')
+            
+            conn.commit()
+            conn.close()
+            logger.debug("Initialized embedding cache table")
+            
+        except Exception as e:
+            logger.error(f"Embedding cache initialization error: {str(e)}")
+
     async def _init_sentence_model(self):
-        """Initialize sentence transformer model lazily"""
+        """Initialize sentence transformer model lazily with async support"""
         if not self.model_loaded:
             try:
                 from sentence_transformers import SentenceTransformer
                 
                 # Use a lightweight model for better performance
                 model_name = 'all-MiniLM-L6-v2'
-                self.sentence_model = SentenceTransformer(model_name)
+                
+                # Load model in a thread pool to avoid blocking
+                loop = asyncio.get_event_loop()
+                self.sentence_model = await loop.run_in_executor(
+                    None, lambda: SentenceTransformer(model_name)
+                )
                 self.model_loaded = True
                 
                 logger.info(f"Sentence transformer model '{model_name}' loaded successfully")
@@ -333,13 +371,109 @@ class AiLayer:
         logger.debug(f"Pattern-based filtering: {len(filtered)} endpoints retained")
         return filtered
     
+    async def _get_cached_embedding(self, text: str, model_name: str = 'all-MiniLM-L6-v2') -> Optional[np.ndarray]:
+        """Get cached embedding or return None"""
+        try:
+            text_hash = hashlib.md5(text.encode()).hexdigest()
+            
+            conn = sqlite3.connect(self.cache_db_path)
+            cursor = conn.cursor()
+            
+            cursor.execute('''
+                SELECT embedding_data FROM embedding_cache 
+                WHERE text_hash = ? AND model_name = ?
+            ''', (text_hash, model_name))
+            
+            result = cursor.fetchone()
+            
+            if result:
+                # Update access count
+                cursor.execute('''
+                    UPDATE embedding_cache 
+                    SET access_count = access_count + 1 
+                    WHERE text_hash = ? AND model_name = ?
+                ''', (text_hash, model_name))
+                conn.commit()
+                
+                # Deserialize embedding
+                import pickle
+                embedding = pickle.loads(result[0])
+                conn.close()
+                return embedding
+            
+            conn.close()
+            return None
+            
+        except Exception as e:
+            logger.warning(f"Embedding cache retrieval error: {str(e)}")
+            return None
+    
+    async def _cache_embedding(self, text: str, embedding: np.ndarray, model_name: str = 'all-MiniLM-L6-v2'):
+        """Cache embedding for future use"""
+        try:
+            text_hash = hashlib.md5(text.encode()).hexdigest()
+            
+            conn = sqlite3.connect(self.cache_db_path)
+            cursor = conn.cursor()
+            
+            # Serialize embedding
+            import pickle
+            embedding_data = pickle.dumps(embedding)
+            
+            cursor.execute('''
+                INSERT OR REPLACE INTO embedding_cache 
+                (text_hash, embedding_data, model_name, access_count)
+                VALUES (?, ?, ?, 1)
+            ''', (text_hash, embedding_data, model_name))
+            
+            conn.commit()
+            conn.close()
+            
+        except Exception as e:
+            logger.warning(f"Embedding cache storage error: {str(e)}")
+    
+    async def _batch_encode_with_cache(self, texts: List[str]) -> List[np.ndarray]:
+        """Encode texts with caching support"""
+        embeddings = []
+        texts_to_encode = []
+        text_indices = []
+        
+        # Check cache for each text
+        for i, text in enumerate(texts):
+            cached_embedding = await self._get_cached_embedding(text)
+            if cached_embedding is not None:
+                embeddings.append(cached_embedding)
+            else:
+                embeddings.append(None)
+                texts_to_encode.append(text)
+                text_indices.append(i)
+        
+        # Batch encode uncached texts
+        if texts_to_encode:
+            loop = asyncio.get_event_loop()
+            new_embeddings = await loop.run_in_executor(
+                None, lambda: self.sentence_model.encode(texts_to_encode)
+            )
+            
+            # Cache new embeddings and update results
+            for j, embedding in enumerate(new_embeddings):
+                text_idx = text_indices[j]
+                embeddings[text_idx] = embedding
+                
+                # Cache asynchronously without blocking
+                asyncio.create_task(
+                    self._cache_embedding(texts_to_encode[j], embedding)
+                )
+        
+        return embeddings
+
     async def _filter_by_semantic_similarity(
         self, 
         endpoints: List[Dict[str, Any]], 
         prompt: str, 
         top_k: int = 50
     ) -> List[Dict[str, Any]]:
-        """Filter endpoints using semantic similarity to user prompt"""
+        """Filter endpoints using semantic similarity to user prompt with caching"""
         
         if not self.model_loaded or not endpoints:
             return endpoints
@@ -370,14 +504,23 @@ class AiLayer:
             if not endpoint_texts:
                 return endpoints
             
-            # Compute embeddings
-            prompt_embedding = self.sentence_model.encode([prompt])[0]
-            endpoint_embeddings = self.sentence_model.encode(endpoint_texts)
+            # Compute embeddings with caching
+            prompt_embedding = await self._get_cached_embedding(prompt)
+            if prompt_embedding is None:
+                loop = asyncio.get_event_loop()
+                prompt_embedding = await loop.run_in_executor(
+                    None, lambda: self.sentence_model.encode([prompt])[0]
+                )
+                await self._cache_embedding(prompt, prompt_embedding)
+            
+            endpoint_embeddings = await self._batch_encode_with_cache(endpoint_texts)
             
             # Calculate cosine similarities
-            similarities = np.dot(endpoint_embeddings, prompt_embedding) / (
-                np.linalg.norm(endpoint_embeddings, axis=1) * np.linalg.norm(prompt_embedding)
-            )
+            similarities = np.array([
+                np.dot(embedding, prompt_embedding) / (
+                    np.linalg.norm(embedding) * np.linalg.norm(prompt_embedding)
+                ) for embedding in endpoint_embeddings
+            ])
             
             # Sort by similarity and take top_k
             similarity_scores = list(zip(similarities, endpoints))
@@ -385,7 +528,7 @@ class AiLayer:
             
             filtered_endpoints = [endpoint for score, endpoint in similarity_scores[:top_k]]
             
-            logger.debug(f"Semantic filtering: selected {len(filtered_endpoints)} most similar endpoints")
+            logger.debug(f"Semantic filtering: selected {len(filtered_endpoints)} most similar endpoints (cached: {len([e for e in endpoint_embeddings if e is not None])})")
             return filtered_endpoints
             
         except Exception as e:
@@ -653,7 +796,7 @@ Focus on realistic API calls that would logically follow the user's history and 
         prompt: str, 
         candidates: List[Dict[str, Any]]
     ) -> List[Dict[str, Any]]:
-        """Apply semantic similarity scoring to enhance confidence scores"""
+        """Apply semantic similarity scoring to enhance confidence scores with caching"""
         
         if not self.model_loaded or not candidates:
             return candidates
@@ -665,13 +808,22 @@ Focus on realistic API calls that would logically follow the user's history and 
                 text = f"{candidate.get('api_call', '')} {candidate.get('description', '')} {candidate.get('reasoning', '')}"
                 candidate_texts.append(text)
             
-            # Compute similarities
-            prompt_embedding = self.sentence_model.encode([prompt])[0]
-            candidate_embeddings = self.sentence_model.encode(candidate_texts)
+            # Compute similarities with caching
+            prompt_embedding = await self._get_cached_embedding(prompt)
+            if prompt_embedding is None:
+                loop = asyncio.get_event_loop()
+                prompt_embedding = await loop.run_in_executor(
+                    None, lambda: self.sentence_model.encode([prompt])[0]
+                )
+                await self._cache_embedding(prompt, prompt_embedding)
             
-            similarities = np.dot(candidate_embeddings, prompt_embedding) / (
-                np.linalg.norm(candidate_embeddings, axis=1) * np.linalg.norm(prompt_embedding)
-            )
+            candidate_embeddings = await self._batch_encode_with_cache(candidate_texts)
+            
+            similarities = np.array([
+                np.dot(embedding, prompt_embedding) / (
+                    np.linalg.norm(embedding) * np.linalg.norm(prompt_embedding)
+                ) for embedding in candidate_embeddings
+            ])
             
             # Enhance confidence scores with semantic similarity
             for i, candidate in enumerate(candidates):
@@ -683,7 +835,7 @@ Focus on realistic API calls that would logically follow the user's history and 
                 candidate['confidence'] = min(enhanced_confidence, 1.0)
                 candidate['semantic_similarity'] = semantic_score
             
-            logger.debug("Applied semantic similarity scoring to candidates")
+            logger.debug("Applied cached semantic similarity scoring to candidates")
             return candidates
             
         except Exception as e:

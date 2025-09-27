@@ -13,6 +13,8 @@ import asyncio
 import logging
 import hashlib
 import pickle
+import sqlite3
+import os
 from typing import Dict, List, Any, Optional, Set, Tuple
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta
@@ -33,7 +35,11 @@ class FeatureExtractor:
     def __init__(self):
         self.settings = get_settings()
         
-        # Initialize sentence transformer for prompt_similarity
+        # Cache database path
+        self.cache_db_path = os.path.join(os.getcwd(), 'data', 'cache.db')
+        os.makedirs(os.path.dirname(self.cache_db_path), exist_ok=True)
+        
+        # Initialize sentence transformer for prompt_similarity with caching
         try:
             self.sentence_model = SentenceTransformer('all-MiniLM-L6-v2')
             logger.info("Loaded sentence-transformers model: all-MiniLM-L6-v2")
@@ -53,7 +59,103 @@ class FeatureExtractor:
                            'retrieve', 'fetch', 'save', 'remove', 'edit', 'view', 'browse',
                            'search', 'filter', 'sort', 'export', 'import', 'upload', 'download'}
         
-        logger.info("Initialized Phase 3 ML Feature Extractor")
+        # Pre-computed workflow pattern vectors for performance
+        self._init_precomputed_features()
+        
+        logger.info("Initialized Phase 5 Optimized ML Feature Extractor")
+    
+    def _init_precomputed_features(self):
+        """Initialize pre-computed feature vectors for common SaaS workflow patterns"""
+        try:
+            conn = sqlite3.connect(self.cache_db_path)
+            cursor = conn.cursor()
+            
+            # Create table for pre-computed feature vectors
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS precomputed_features (
+                    pattern_hash TEXT PRIMARY KEY,
+                    pattern_type TEXT NOT NULL,
+                    feature_vector BLOB NOT NULL,
+                    pattern_data TEXT NOT NULL,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    usage_count INTEGER DEFAULT 0
+                )
+            ''')
+            
+            conn.commit()
+            
+            # Pre-compute workflow pattern features
+            workflow_patterns = [
+                {'type': 'auth_flow', 'sequence': ['POST /auth/login', 'GET /user/profile', 'GET /dashboard']},
+                {'type': 'crud_flow', 'sequence': ['GET /items', 'POST /items', 'PUT /items/{id}', 'DELETE /items/{id}']},
+                {'type': 'search_flow', 'sequence': ['GET /search', 'GET /items', 'GET /items/{id}']},
+                {'type': 'file_flow', 'sequence': ['POST /files/upload', 'GET /files', 'GET /files/{id}']},
+                {'type': 'user_mgmt', 'sequence': ['GET /users', 'POST /users', 'PUT /users/{id}']},
+            ]
+            
+            for pattern in workflow_patterns:
+                pattern_hash = hashlib.md5(str(pattern).encode()).hexdigest()
+                
+                # Check if already exists
+                cursor.execute('SELECT pattern_hash FROM precomputed_features WHERE pattern_hash = ?', (pattern_hash,))
+                if not cursor.fetchone():
+                    # Compute feature vector
+                    feature_vector = self._compute_workflow_vector(pattern['sequence'])
+                    
+                    cursor.execute('''
+                        INSERT INTO precomputed_features 
+                        (pattern_hash, pattern_type, feature_vector, pattern_data)
+                        VALUES (?, ?, ?, ?)
+                    ''', (
+                        pattern_hash,
+                        pattern['type'],
+                        pickle.dumps(feature_vector),
+                        json.dumps(pattern)
+                    ))
+            
+            conn.commit()
+            conn.close()
+            
+            logger.debug("Initialized pre-computed SaaS workflow features")
+            
+        except Exception as e:
+            logger.error(f"Pre-computed features initialization error: {str(e)}")
+    
+    def _compute_workflow_vector(self, sequence: List[str]) -> np.ndarray:
+        """Compute feature vector for a workflow sequence"""
+        # Extract resource transitions, method patterns, etc.
+        resources = []
+        methods = []
+        
+        for api_call in sequence:
+            parts = api_call.split(' ', 1)
+            if len(parts) == 2:
+                method, path = parts
+                methods.append(method.upper())
+                
+                # Extract resource from path
+                path_parts = path.strip('/').split('/')
+                for part in path_parts:
+                    if part in self.resources:
+                        resources.append(part)
+                        break
+        
+        # Create feature vector (simplified)
+        vector = np.zeros(20)  # 20-dimensional vector
+        
+        # Method distribution
+        for i, method in enumerate(['GET', 'POST', 'PUT', 'DELETE', 'PATCH']):
+            vector[i] = methods.count(method) / len(methods) if methods else 0
+        
+        # Resource diversity
+        vector[5] = len(set(resources)) / len(resources) if resources else 0
+        
+        # Sequence length
+        vector[6] = len(sequence) / 10.0  # Normalized
+        
+        # Add more features as needed...
+        
+        return vector
     
     async def extract_ml_features(
         self,
@@ -233,52 +335,98 @@ class FeatureExtractor:
         return 'unknown'
     
     async def _get_workflow_distance(self, candidate_api: Optional[Dict[str, Any]], history: Optional[List[Dict[str, Any]]]) -> float:
-        """Calculate workflow distance based on common SaaS patterns"""
+        """Calculate workflow distance using pre-computed SaaS patterns for performance"""
         if not candidate_api:
             return 1.0
         
-        candidate_method = candidate_api.get('method', '').upper()
-        candidate_resource = self._extract_resource_from_api(candidate_api.get('api_call', ''))
-        
-        # Common workflow patterns (resource, method) -> next likely (resource, method)
-        workflow_patterns = {
-            ('auth', 'POST'): [('users', 'GET'), ('items', 'GET'), ('dashboard', 'GET')],
-            ('users', 'GET'): [('users', 'PUT'), ('items', 'GET'), ('settings', 'GET')],
-            ('items', 'GET'): [('items', 'PUT'), ('items', 'POST'), ('items', 'DELETE')],
-            ('items', 'POST'): [('items', 'PUT'), ('items', 'GET')],
-            ('items', 'PUT'): [('items', 'GET'), ('files', 'POST')],
-        }
-        
-        # Get recent context
-        if not history:
+        try:
+            candidate_method = candidate_api.get('method', '').upper()
+            candidate_resource = self._extract_resource_from_api(candidate_api.get('api_call', ''))
+            
+            # Fast lookup for common patterns
+            common_patterns = {
+                ('auth', 'POST'): 0.1,
+                ('users', 'GET'): 0.2,
+                ('items', 'GET'): 0.15,
+                ('items', 'POST'): 0.25,
+                ('items', 'PUT'): 0.3,
+                ('files', 'POST'): 0.35,
+            }
+            
+            # Get recent context with caching
+            if not history:
+                return 0.5
+            
+            # Build current sequence for pattern matching
+            current_sequence = []
+            for item in list(reversed(history))[:5]:  # Last 5 items
+                if isinstance(item, dict) and 'api_call' in item and 'method' in item:
+                    api_call = f"{item['method'].upper()} {item['api_call']}"
+                    current_sequence.append(api_call)
+            
+            # Add candidate to sequence
+            candidate_call = f"{candidate_method} {candidate_api.get('api_call', '')}"
+            current_sequence.append(candidate_call)
+            
+            # Check against pre-computed workflow patterns
+            min_distance = await self._match_precomputed_patterns(current_sequence)
+            
+            # Fallback to quick pattern matching
+            if min_distance == 1.0:
+                for context_item in [(self._extract_resource_from_api(item.get('api_call', '')), item.get('method', '').upper()) for item in history[-3:] if isinstance(item, dict)]:
+                    if context_item in common_patterns:
+                        candidate_pair = (candidate_resource, candidate_method)
+                        if candidate_pair in common_patterns:
+                            pattern_distance = abs(common_patterns[context_item] - common_patterns[candidate_pair])
+                            min_distance = min(min_distance, pattern_distance)
+            
+            return min_distance
+            
+        except Exception as e:
+            logger.warning(f"Workflow distance calculation error: {e}")
             return 0.5
-        
-        recent_context = []
-        for item in list(reversed(history))[:3]:
-            if isinstance(item, dict) and 'api_call' in item and 'method' in item:
-                resource = self._extract_resource_from_api(item['api_call'])
-                method = item['method'].upper()
-                recent_context.append((resource, method))
-        
-        # Calculate distance based on workflow patterns
-        min_distance = 1.0
-        for context_item in recent_context:
-            if context_item in workflow_patterns:
-                expected_next = workflow_patterns[context_item]
-                candidate_pair = (candidate_resource, candidate_method)
+    
+    async def _match_precomputed_patterns(self, sequence: List[str]) -> float:
+        """Match current sequence against pre-computed workflow patterns"""
+        try:
+            conn = sqlite3.connect(self.cache_db_path)
+            cursor = conn.cursor()
+            
+            # Get all pre-computed patterns
+            cursor.execute('''
+                SELECT pattern_type, feature_vector, pattern_data 
+                FROM precomputed_features
+            ''')
+            
+            patterns = cursor.fetchall()
+            conn.close()
+            
+            if not patterns:
+                return 1.0
+            
+            # Compute current sequence vector
+            current_vector = self._compute_workflow_vector(sequence)
+            
+            min_distance = 1.0
+            for pattern_type, feature_blob, pattern_data in patterns:
+                pattern_vector = pickle.loads(feature_blob)
                 
-                for expected in expected_next:
-                    # Calculate similarity
-                    resource_match = 1.0 if expected[0] == candidate_pair[0] else 0.0
-                    method_match = 1.0 if expected[1] == candidate_pair[1] else 0.0
-                    similarity = (resource_match + method_match) / 2.0
+                # Calculate cosine distance
+                if np.linalg.norm(current_vector) > 0 and np.linalg.norm(pattern_vector) > 0:
+                    similarity = np.dot(current_vector, pattern_vector) / (
+                        np.linalg.norm(current_vector) * np.linalg.norm(pattern_vector)
+                    )
                     distance = 1.0 - similarity
                     min_distance = min(min_distance, distance)
-        
-        return min_distance
+            
+            return min_distance
+            
+        except Exception as e:
+            logger.warning(f"Pre-computed pattern matching error: {e}")
+            return 1.0
     
     async def _get_prompt_similarity(self, prompt: str, candidate_api: Optional[Dict[str, Any]]) -> float:
-        """Calculate semantic similarity between prompt and API using sentence-transformers"""
+        """Calculate semantic similarity with embedding caching for performance"""
         if not self.sentence_model or not candidate_api:
             return 0.0
         
@@ -286,13 +434,22 @@ class FeatureExtractor:
             # Create text representations
             api_text = self._api_to_text(candidate_api)
             
-            # Get embeddings
-            prompt_embedding = self.sentence_model.encode([prompt])
-            api_embedding = self.sentence_model.encode([api_text])
+            # Check cache for embeddings
+            prompt_embedding = await self._get_cached_embedding(prompt)
+            api_embedding = await self._get_cached_embedding(api_text)
+            
+            # Compute missing embeddings
+            if prompt_embedding is None:
+                prompt_embedding = self.sentence_model.encode([prompt])[0]
+                await self._cache_embedding(prompt, prompt_embedding)
+            
+            if api_embedding is None:
+                api_embedding = self.sentence_model.encode([api_text])[0]
+                await self._cache_embedding(api_text, api_embedding)
             
             # Calculate cosine similarity
-            similarity = np.dot(prompt_embedding[0], api_embedding[0]) / (
-                np.linalg.norm(prompt_embedding[0]) * np.linalg.norm(api_embedding[0])
+            similarity = np.dot(prompt_embedding, api_embedding) / (
+                np.linalg.norm(prompt_embedding) * np.linalg.norm(api_embedding)
             )
             
             return float(max(0.0, min(1.0, similarity)))
@@ -300,6 +457,51 @@ class FeatureExtractor:
         except Exception as e:
             logger.warning(f"Prompt similarity calculation failed: {e}")
             return self._fallback_text_similarity(prompt, candidate_api)
+    
+    async def _get_cached_embedding(self, text: str) -> Optional[np.ndarray]:
+        """Get cached embedding or return None"""
+        try:
+            text_hash = hashlib.md5(text.encode()).hexdigest()
+            
+            conn = sqlite3.connect(self.cache_db_path)
+            cursor = conn.cursor()
+            
+            cursor.execute('''
+                SELECT embedding_data FROM embedding_cache 
+                WHERE text_hash = ? AND model_name = ?
+            ''', (text_hash, 'all-MiniLM-L6-v2'))
+            
+            result = cursor.fetchone()
+            conn.close()
+            
+            if result:
+                return pickle.loads(result[0])
+            
+            return None
+            
+        except Exception as e:
+            logger.warning(f"Embedding cache retrieval error: {str(e)}")
+            return None
+    
+    async def _cache_embedding(self, text: str, embedding: np.ndarray):
+        """Cache embedding for future use"""
+        try:
+            text_hash = hashlib.md5(text.encode()).hexdigest()
+            
+            conn = sqlite3.connect(self.cache_db_path)
+            cursor = conn.cursor()
+            
+            cursor.execute('''
+                INSERT OR REPLACE INTO embedding_cache 
+                (text_hash, embedding_data, model_name, access_count)
+                VALUES (?, ?, ?, 1)
+            ''', (text_hash, pickle.dumps(embedding), 'all-MiniLM-L6-v2'))
+            
+            conn.commit()
+            conn.close()
+            
+        except Exception as e:
+            logger.warning(f"Embedding cache storage error: {str(e)}")
     
     def _api_to_text(self, api: Dict[str, Any]) -> str:
         """Convert API call to natural language text"""

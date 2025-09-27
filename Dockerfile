@@ -63,13 +63,14 @@ COPY --from=builder /root/.cache /app/.cache
 # Create application directory
 WORKDIR /app
 
-# Copy application code
-COPY app/ ./app/
-COPY data/ ./data/
-COPY .env ./
+# Copy application code (Phase 5: Include ALL directories)
+COPY . .
 
-# Create necessary directories and set permissions (including ML cache)
-RUN mkdir -p /app/data/training_data /app/tests /app/logs /app/.cache/huggingface /app/.cache/sentence_transformers && \
+# Ensure permissions on copied files
+RUN ls -la /app/ && ls -la /app/tests/ && ls -la /app/examples/ || echo "Missing directories"
+
+# Create necessary directories and set permissions (Phase 5: Include performance test dirs)
+RUN mkdir -p /app/data/training_data /app/tests /app/examples /app/logs /app/.cache/huggingface /app/.cache/sentence_transformers && \
     chown -R appuser:appuser /app && \
     chmod -R 755 /app
 
@@ -100,12 +101,12 @@ CMD ["uvicorn", "app.main:app", \
 
 # Labels for container metadata (updated for Phase 3)
 LABEL maintainer="OpenSesame Team" \
-      version="3.0.0" \
-      description="OpenSesame Predictor - Phase 3 ML Layer with LightGBM ranking" \
+      version="5.0.0" \
+      description="OpenSesame Predictor - Phase 5 Performance Optimized with Async Parallel Processing" \
       python.version="3.12" \
       framework="FastAPI" \
       ml.libraries="LightGBM,sentence-transformers" \
-      phase="3-ml-layer"
+      phase="5-performance-optimized"
 
 # Optional: Multi-architecture build support
 # Add --platform flag when building for different architectures:
