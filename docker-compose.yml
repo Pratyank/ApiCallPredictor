@@ -18,16 +18,18 @@ services:
       - OPENSESAME_API_HOST=0.0.0.0
       - OPENSESAME_API_PORT=8000
       
-      # Database Configuration
-      - OPENSESAME_DATABASE_URL=sqlite:///./database/opensesame.db
+      # Database Configuration (Phase 3 uses data/cache.db)
+      - OPENSESAME_DATABASE_URL=sqlite:///./data/cache.db
       
       # Cache Configuration
       - OPENSESAME_CACHE_TTL_SECONDS=3600
       - OPENSESAME_OPENAPI_CACHE_TTL=3600
       
-      # ML Model Configuration
-      - OPENSESAME_MAX_MODEL_MEMORY_MB=512
-      - OPENSESAME_PREDICTION_TIMEOUT_SECONDS=30
+      # ML Model Configuration (Phase 3)
+      - OPENSESAME_MAX_MODEL_MEMORY_MB=1024
+      - OPENSESAME_PREDICTION_TIMEOUT_SECONDS=60
+      - TRANSFORMERS_CACHE=/app/.cache/huggingface
+      - SENTENCE_TRANSFORMERS_HOME=/app/.cache/sentence_transformers
       
       # LLM Configuration (placeholder values)
       - OPENSESAME_LLM_PROVIDER=placeholder
@@ -39,41 +41,46 @@ services:
       - OPENSESAME_MAX_PROMPT_LENGTH=4096
       
       # AI Layer Configuration (Phase 2)
-      - ANTHROPIC_API_KEY=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
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
       
-      # Performance Configuration
-      - OPENSESAME_WORKER_COUNT=2
-      - OPENSESAME_MAX_CONCURRENT_REQUESTS=100
-      - OPENSESAME_REQUEST_TIMEOUT_SECONDS=60
+      # Phase 3 ML Layer Configuration
+      - OPENSESAME_ML_ENABLED=true
+      - OPENSESAME_ML_K_VALUE=3
+      - OPENSESAME_ML_BUFFER_SIZE=2
+      
+      # Performance Configuration (updated for ML)
+      - OPENSESAME_WORKER_COUNT=1
+      - OPENSESAME_MAX_CONCURRENT_REQUESTS=10
+      - OPENSESAME_REQUEST_TIMEOUT_SECONDS=120
     volumes:
-      # Persistent database storage
-      - database_volume:/app/database
+      # Persistent ML data storage (Phase 3 needs read/write access)
+      - data_volume:/app/data
+      # ML model cache storage
+      - ml_cache_volume:/app/.cache
       # Optional: Mount logs directory
       - logs_volume:/app/logs
-      # Optional: Mount data directory for training data
-      - ./data:/app/data:ro
     networks:
       - opensesame_network
     depends_on:
       - redis
     restart: unless-stopped
-    # Resource constraints (2 CPU cores, 4GB memory)
+    # Resource constraints (updated for Phase 3 ML Layer)
     deploy:
       resources:
         limits:
-          cpus: '2.0'
-          memory: 4G
+          cpus: '3.0'
+          memory: 6G
         reservations:
-          cpus: '1.0'
-          memory: 2G
-    # Health check
+          cpus: '2.0'
+          memory: 3G
+    # Health check (extended timeout for ML processing)
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 60s
+      interval: 60s
+      timeout: 30s
+      retries: 5
+      start_period: 180s
 
   # Redis for advanced caching (optional)
   redis:
@@ -86,13 +93,13 @@ services:
     networks:
       - opensesame_network
     restart: unless-stopped
-    # Redis configuration
-    command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru
+    # Redis configuration (increased memory for ML caching)
+    command: redis-server --appendonly yes --maxmemory 1024mb --maxmemory-policy allkeys-lru
     deploy:
       resources:
         limits:
           cpus: '0.5'
-          memory: 512M
+          memory: 1G
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 30s
@@ -174,7 +181,9 @@ services:
 
 # Named volumes for data persistence
 volumes:
-  database_volume:
+  data_volume:
+    driver: local
+  ml_cache_volume:
     driver: local
   redis_data:
     driver: local

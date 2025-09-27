@@ -4,7 +4,7 @@ from typing import List, Dict, Any, Optional
 import logging
 from datetime import datetime
 from app.config import get_settings
-from app.models.ai_layer import get_ai_layer
+from app.models.predictor import get_predictor
 from app.utils.guardrails import SafetyValidator
 import json
 
@@ -43,28 +43,35 @@ class PredictionResponse(BaseModel):
 
 @app.get("/")
 async def root():
-    """Health check endpoint"""
-    return {"message": "OpenSesame Predictor API is running", "version": "1.0.0"}
+    """Root endpoint with Phase 3 ML Layer information"""
+    return {
+        "message": "OpenSesame Predictor API is running - Phase 3 ML Layer", 
+        "version": "v3.0-ml-layer",
+        "phase": "Phase 3 - ML Layer with LightGBM ranking",
+        "features": ["AI + ML hybrid predictions", "LightGBM ranking", "Feature engineering", "Markov chain training data"]
+    }
 
 @app.get("/health")
 async def health_check():
-    """Detailed health check endpoint"""
-    return {
-        "status": "healthy",
-        "service": "opensesame-predictor",
-        "version": "1.0.0",
-        "components": {
-            "prediction_engine": "operational",
-            "safety_validator": "operational",
-            "cache": "operational"
+    """Comprehensive Phase 3 ML health check endpoint"""
+    try:
+        predictor = await get_predictor()
+        health = await predictor.health_check()
+        return health
+    except Exception as e:
+        logger.error(f"Health check error: {str(e)}")
+        return {
+            "status": "unhealthy",
+            "service": "opensesame-predictor-ml",
+            "version": "v3.0-ml-layer",
+            "error": str(e)
         }
-    }
 
 @app.post("/predict", response_model=PredictionResponse)
 async def predict_api_calls(request: PredictionRequest):
     """
-    Main prediction endpoint that accepts JSON payload with user prompt and history
-    Returns predicted API calls with confidence scores
+    Phase 3 ML prediction endpoint that uses integrated AI + ML ranking
+    Returns ML-ranked API calls with confidence scores and enhanced metadata
     """
     try:
         # Validate input safety
@@ -72,68 +79,83 @@ async def predict_api_calls(request: PredictionRequest):
             raise HTTPException(status_code=400, detail="Input failed safety validation")
         
         # Log request (without sensitive data)
-        logger.info(f"Processing prediction request with prompt length: {len(request.prompt)}")
+        logger.info(f"Processing Phase 3 ML prediction request with prompt length: {len(request.prompt)}")
         
-        # Generate predictions using the new AI layer
-        ai_layer = await get_ai_layer()
+        # Generate predictions using the integrated Predictor (AI + ML)
+        predictor = await get_predictor()
         
-        # Generate predictions with enhanced AI capabilities
-        predictions = await ai_layer.generate_predictions(
+        # Generate ML-ranked predictions
+        result = await predictor.predict(
             prompt=request.prompt,
             history=request.history,
-            k=request.max_predictions,
-            temperature=request.temperature
+            max_predictions=request.max_predictions,
+            temperature=request.temperature,
+            use_ml_ranking=True
         )
-        
-        # Extract confidence scores
-        confidence_scores = [pred.get('confidence', 0.0) for pred in predictions]
-        
-        # Calculate processing time (approximated from predictions)
-        processing_time_ms = predictions[0].get('processing_time_ms', 0.0) if predictions else 0.0
-        
-        result = {
-            'predictions': predictions,
-            'confidence_scores': confidence_scores,
-            'processing_time_ms': processing_time_ms,
-            'model_version': 'v2.0-ai-layer',
-            'timestamp': datetime.now().isoformat(),
-            'ai_provider': predictions[0].get('ai_provider', 'unknown') if predictions else 'unknown'
-        }
         
         return PredictionResponse(
             predictions=result["predictions"],
             confidence_scores=result["confidence_scores"],
-            metadata={
-                "model_version": result.get("model_version", "v1.0"),
-                "timestamp": result.get("timestamp"),
-                "processing_method": "hybrid_ml_llm"
-            },
+            metadata=result.get("metadata", {}),
             processing_time_ms=result["processing_time_ms"]
         )
         
     except Exception as e:
-        logger.error(f"Prediction error: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Prediction failed: {str(e)}")
+        logger.error(f"Phase 3 ML prediction error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"ML prediction failed: {str(e)}")
 
 @app.get("/metrics")
 async def get_metrics():
-    """Get system metrics and performance stats"""
+    """Get comprehensive Phase 3 ML system metrics and performance stats"""
     try:
-        ai_layer = await get_ai_layer()
-        ai_metrics = await ai_layer.get_status()
-        
-        # Get cache stats from spec parser
-        cache_stats = await ai_layer.spec_parser.get_cache_stats()
+        predictor = await get_predictor()
+        metrics = await predictor.get_metrics()
         
         return {
-            "ai_layer_metrics": ai_metrics,
-            "cache_stats": cache_stats,
+            **metrics,
             "uptime": "placeholder_uptime",
-            "version": "v2.0-ai-layer"
+            "version": "v3.0-ml-layer",
+            "phase": "Phase 3 - ML Layer"
         }
     except Exception as e:
-        logger.error(f"Metrics retrieval error: {str(e)}")
-        raise HTTPException(status_code=500, detail="Metrics unavailable")
+        logger.error(f"Phase 3 metrics retrieval error: {str(e)}")
+        raise HTTPException(status_code=500, detail="ML metrics unavailable")
+
+@app.post("/train")
+async def train_ml_model():
+    """Train or retrain the ML ranking model with available data"""
+    try:
+        logger.info("Received request to train ML model")
+        
+        predictor = await get_predictor()
+        training_stats = await predictor.train_ml_model()
+        
+        return {
+            "status": "training_completed",
+            "training_stats": training_stats,
+            "timestamp": datetime.now().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"ML model training error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"ML training failed: {str(e)}")
+
+@app.post("/generate-data")
+async def generate_training_data():
+    """Generate synthetic training data for ML model"""
+    try:
+        from data.synthetic_generator import generate_ml_training_data
+        
+        logger.info("Generating synthetic training data...")
+        stats = await generate_ml_training_data(num_sequences=10000)
+        
+        return {
+            "status": "data_generated",
+            "generation_stats": stats,
+            "timestamp": datetime.now().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Data generation error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Data generation failed: {str(e)}")
 
 if __name__ == "__main__":
     import uvicorn

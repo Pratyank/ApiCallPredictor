@@ -55,6 +55,9 @@ anthropic==0.34.2
 openai==1.44.1
 sentence-transformers==3.2.0
 
+# ML Layer Dependencies (Phase 3)
+lightgbm==4.1.0
+
 # Additional dependencies for AI Layer
 torch>=2.0.0  # Required by sentence-transformers
 transformers>=4.21.0  # Required by sentence-transformers

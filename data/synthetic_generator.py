@@ -1,477 +1,558 @@
 """
-Synthetic Data Generator for OpenSesame Predictor Training
-Generates realistic API call prediction training data with diverse patterns and edge cases
+Synthetic Data Generator for Phase 3 ML Layer - OpenSesame Predictor
+Generates 10,000 synthetic SaaS workflow sequences using Markov chains
+Stores sequences in data/cache.db using sqlite3
 """
 
 import json
 import random
 import uuid
-from typing import List, Dict, Any, Tuple
+import sqlite3
+import asyncio
+from typing import List, Dict, Any, Tuple, Optional
 from datetime import datetime, timedelta
+from collections import defaultdict, Counter
 import logging
+
+# Import database manager
+import sys
+import os
+sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
+from app.utils.db_manager import db_manager
 
 logger = logging.getLogger(__name__)
 
-class SyntheticDataGenerator:
+class MarkovChainGenerator:
     """
-    Generate synthetic training data for the OpenSesame API call predictor
-    Creates realistic user prompts, API calls, and confidence scores
+    Markov chain-based generator for realistic SaaS workflow sequences
     """
     
     def __init__(self):
-        self.api_patterns = self._load_api_patterns()
-        self.prompt_templates = self._load_prompt_templates()
-        self.entity_types = self._load_entity_types()
-        self.confidence_ranges = self._load_confidence_ranges()
+        self.workflow_transitions = self._build_saas_workflow_transitions()
+        self.api_endpoints = self._build_saas_api_endpoints()
+        self.workflow_prompts = self._build_workflow_prompts()
         
-        logger.info("Initialized Synthetic Data Generator for training data creation")
+        # Markov chain parameters
+        self.chain_order = 2  # 2-gram transitions for more realistic sequences
+        self.max_sequence_length = 15
+        self.min_sequence_length = 3
+        
+        logger.info("Initialized Markov Chain Generator for SaaS workflow sequences")
     
-    def generate_training_dataset(
-        self,
-        num_samples: int = 2000,
-        include_negative_examples: bool = True
-    ) -> List[Dict[str, Any]]:
-        """
-        Generate comprehensive training dataset
-        
-        Args:
-            num_samples: Number of training samples to generate
-            include_negative_examples: Include low-quality predictions for contrast
-            
-        Returns:
-            List of training samples with prompts, API calls, and metadata
-        """
-        
-        dataset = []
-        
-        # Generate positive examples (70%)
-        positive_count = int(num_samples * 0.7)
-        for _ in range(positive_count):
-            sample = self._generate_positive_sample()
-            dataset.append(sample)
-        
-        # Generate neutral examples (20%)
-        neutral_count = int(num_samples * 0.2)
-        for _ in range(neutral_count):
-            sample = self._generate_neutral_sample()
-            dataset.append(sample)
-        
-        # Generate negative examples (10%) if requested
-        if include_negative_examples:
-            negative_count = num_samples - positive_count - neutral_count
-            for _ in range(negative_count):
-                sample = self._generate_negative_sample()
-                dataset.append(sample)
-        
-        # Shuffle dataset
-        random.shuffle(dataset)
-        
-        logger.info(f"Generated {len(dataset)} training samples")
-        return dataset
-    
-    def _generate_positive_sample(self) -> Dict[str, Any]:
-        """Generate high-quality training sample"""
-        
-        # Select random API pattern and intent
-        pattern = random.choice(list(self.api_patterns.keys()))
-        api_info = random.choice(self.api_patterns[pattern])
-        
-        # Generate realistic user prompt
-        prompt = self._generate_prompt_for_api(api_info, pattern, quality="high")
-        
-        # Create expected API call prediction
-        prediction = {
-            "api_call": api_info["endpoint"],
-            "method": api_info["method"],
-            "description": api_info["description"],
-            "parameters": api_info.get("parameters", {}),
-            "response_format": api_info.get("response_format", "JSON"),
-            "confidence": random.uniform(0.75, 0.95)
-        }
-        
+    def _build_saas_workflow_transitions(self) -> Dict[str, Dict[str, float]]:
+        """Build transition probabilities for common SaaS workflows"""
         return {
-            "id": str(uuid.uuid4()),
-            "prompt": prompt,
-            "expected_prediction": prediction,
-            "intent": pattern,
-            "quality_label": "high",
-            "metadata": {
-                "pattern_type": pattern,
-                "generated_at": datetime.utcnow().isoformat(),
-                "complexity": "standard"
+            # Authentication workflows
+            'START': {
+                'Browse': 0.4,
+                'Login': 0.3,
+                'Register': 0.2,
+                'Search': 0.1
+            },
+            'Login': {
+                'Browse': 0.5,
+                'Profile': 0.2,
+                'Dashboard': 0.3
+            },
+            'Register': {
+                'Verify': 0.7,
+                'Profile': 0.3
+            },
+            'Verify': {
+                'Login': 0.9,
+                'Profile': 0.1
+            },
+            
+            # Content management workflows
+            'Browse': {
+                'View': 0.4,
+                'Search': 0.3,
+                'Create': 0.2,
+                'END': 0.1
+            },
+            'Search': {
+                'Browse': 0.5,
+                'View': 0.3,
+                'Filter': 0.2
+            },
+            'Filter': {
+                'Browse': 0.6,
+                'View': 0.4
+            },
+            'View': {
+                'Edit': 0.3,
+                'Delete': 0.1,
+                'Share': 0.2,
+                'Browse': 0.3,
+                'END': 0.1
+            },
+            'Create': {
+                'Edit': 0.6,
+                'Save': 0.3,
+                'Cancel': 0.1
+            },
+            'Edit': {
+                'Save': 0.7,
+                'Preview': 0.2,
+                'Cancel': 0.1
+            },
+            'Preview': {
+                'Edit': 0.4,
+                'Save': 0.6
+            },
+            'Save': {
+                'Confirm': 0.8,
+                'Edit': 0.2
+            },
+            'Confirm': {
+                'View': 0.4,
+                'Browse': 0.4,
+                'Share': 0.1,
+                'END': 0.1
+            },
+            
+            # User management workflows
+            'Profile': {
+                'Edit': 0.6,
+                'Settings': 0.3,
+                'Logout': 0.1
+            },
+            'Settings': {
+                'Update': 0.7,
+                'Profile': 0.3
+            },
+            'Update': {
+                'Save': 0.8,
+                'Cancel': 0.2
+            },
+            
+            # E-commerce workflows
+            'Dashboard': {
+                'Browse': 0.4,
+                'Orders': 0.3,
+                'Analytics': 0.2,
+                'Settings': 0.1
+            },
+            'Orders': {
+                'View': 0.5,
+                'Create': 0.3,
+                'Export': 0.2
+            },
+            'Analytics': {
+                'Export': 0.4,
+                'Filter': 0.3,
+                'Dashboard': 0.3
+            },
+            
+            # File management workflows
+            'Upload': {
+                'Process': 0.8,
+                'Cancel': 0.2
+            },
+            'Process': {
+                'Confirm': 0.9,
+                'Retry': 0.1
+            },
+            'Download': {
+                'Confirm': 0.9,
+                'Cancel': 0.1
+            },
+            
+            # Sharing workflows
+            'Share': {
+                'Send': 0.6,
+                'Configure': 0.4
+            },
+            'Configure': {
+                'Share': 0.7,
+                'Cancel': 0.3
+            },
+            'Send': {
+                'Confirm': 0.8,
+                'Edit': 0.2
+            },
+            
+            # Termination states
+            'Delete': {
+                'Confirm': 0.8,
+                'Cancel': 0.2
+            },
+            'Cancel': {
+                'Browse': 0.5,
+                'END': 0.5
+            },
+            'Logout': {
+                'END': 1.0
+            },
+            'Export': {
+                'Download': 0.7,
+                'END': 0.3
+            },
+            'Retry': {
+                'Process': 0.6,
+                'Upload': 0.4
             }
         }
     
-    def _generate_neutral_sample(self) -> Dict[str, Any]:
-        """Generate medium-quality training sample"""
-        
-        pattern = random.choice(list(self.api_patterns.keys()))
-        api_info = random.choice(self.api_patterns[pattern])
-        
-        # Generate somewhat ambiguous prompt
-        prompt = self._generate_prompt_for_api(api_info, pattern, quality="medium")
-        
-        prediction = {
-            "api_call": api_info["endpoint"],
-            "method": api_info["method"],
-            "description": api_info["description"],
-            "parameters": api_info.get("parameters", {}),
-            "response_format": api_info.get("response_format", "JSON"),
-            "confidence": random.uniform(0.4, 0.75)
-        }
-        
+    def _build_saas_api_endpoints(self) -> Dict[str, List[Dict[str, Any]]]:
+        """Map workflow actions to realistic SaaS API endpoints"""
         return {
-            "id": str(uuid.uuid4()),
-            "prompt": prompt,
-            "expected_prediction": prediction,
-            "intent": pattern,
-            "quality_label": "medium",
-            "metadata": {
-                "pattern_type": pattern,
-                "generated_at": datetime.utcnow().isoformat(),
-                "complexity": "ambiguous"
-            }
-        }
-    
-    def _generate_negative_sample(self) -> Dict[str, Any]:
-        """Generate low-quality training sample for contrast learning"""
-        
-        pattern = random.choice(list(self.api_patterns.keys()))
-        api_info = random.choice(self.api_patterns[pattern])
-        
-        # Generate vague or misleading prompt
-        prompt = self._generate_prompt_for_api(api_info, pattern, quality="low")
-        
-        # Create mismatched or low-confidence prediction
-        wrong_pattern = random.choice([p for p in self.api_patterns.keys() if p != pattern])
-        wrong_api = random.choice(self.api_patterns[wrong_pattern])
-        
-        prediction = {
-            "api_call": wrong_api["endpoint"],
-            "method": wrong_api["method"], 
-            "description": wrong_api["description"],
-            "parameters": wrong_api.get("parameters", {}),
-            "response_format": wrong_api.get("response_format", "JSON"),
-            "confidence": random.uniform(0.1, 0.4)
-        }
-        
-        return {
-            "id": str(uuid.uuid4()),
-            "prompt": prompt,
-            "expected_prediction": prediction,
-            "intent": pattern,
-            "quality_label": "low",
-            "metadata": {
-                "pattern_type": pattern,
-                "generated_at": datetime.utcnow().isoformat(),
-                "complexity": "mismatch",
-                "is_negative_example": True
-            }
-        }
-    
-    def _generate_prompt_for_api(self, api_info: Dict[str, Any], pattern: str, quality: str) -> str:
-        """Generate realistic user prompt for given API and quality level"""
-        
-        templates = self.prompt_templates.get(pattern, {}).get(quality, [])
-        if not templates:
-            templates = ["I need to {action} some {entity}"]
-        
-        template = random.choice(templates)
-        
-        # Fill in template variables
-        prompt = template.format(
-            action=self._get_action_word(api_info["method"]),
-            entity=self._get_entity_for_endpoint(api_info["endpoint"]),
-            resource=self._get_resource_name(api_info["endpoint"])
-        )
-        
-        # Add context variation
-        if quality == "high":
-            prompt += f" {self._add_helpful_context(api_info)}"
-        elif quality == "low":
-            prompt = self._make_prompt_vague(prompt)
-        
-        return prompt.strip()
-    
-    def _get_action_word(self, method: str) -> str:
-        """Get appropriate action word for HTTP method"""
-        action_map = {
-            "GET": random.choice(["get", "fetch", "retrieve", "find", "show"]),
-            "POST": random.choice(["create", "add", "submit", "post", "make"]),
-            "PUT": random.choice(["update", "modify", "change", "replace"]),
-            "DELETE": random.choice(["delete", "remove", "destroy", "drop"]),
-            "PATCH": random.choice(["update", "modify", "patch", "change"])
-        }
-        return action_map.get(method.upper(), "access")
-    
-    def _get_entity_for_endpoint(self, endpoint: str) -> str:
-        """Extract entity type from API endpoint"""
-        if "users" in endpoint.lower():
-            return random.choice(["users", "accounts", "profiles"])
-        elif "posts" in endpoint.lower():
-            return random.choice(["posts", "articles", "content"])
-        elif "orders" in endpoint.lower():
-            return random.choice(["orders", "purchases", "transactions"])
-        elif "products" in endpoint.lower():
-            return random.choice(["products", "items", "inventory"])
-        else:
-            return random.choice(["data", "resources", "items", "records"])
-    
-    def _get_resource_name(self, endpoint: str) -> str:
-        """Extract resource name from endpoint"""
-        parts = endpoint.strip('/').split('/')
-        if len(parts) >= 2:
-            return parts[-1] if not parts[-1].startswith('{') else parts[-2]
-        return "resource"
-    
-    def _add_helpful_context(self, api_info: Dict[str, Any]) -> str:
-        """Add helpful context to make prompt clearer"""
-        contexts = [
-            f"Please include {', '.join(list(api_info.get('parameters', {}).keys())[:2])} in the response.",
-            "Make sure the response is in JSON format.",
-            f"This should return {api_info.get('response_format', 'data')}.",
-            "I need this for my application integration."
-        ]
-        return random.choice(contexts)
-    
-    def _make_prompt_vague(self, prompt: str) -> str:
-        """Make prompt intentionally vague or unclear"""
-        vague_modifiers = [
-            "Maybe I need to",
-            "I think I want to",
-            "Could you help me",
-            "I'm not sure but",
-            "Possibly I should"
-        ]
-        modifier = random.choice(vague_modifiers)
-        return f"{modifier} {prompt.lower()}"
-    
-    def _load_api_patterns(self) -> Dict[str, List[Dict[str, Any]]]:
-        """Load realistic API patterns for different domains"""
-        
-        return {
-            "user_management": [
-                {
-                    "endpoint": "/api/users",
-                    "method": "GET",
-                    "description": "Retrieve list of users",
-                    "parameters": {"limit": 10, "offset": 0, "include": "profile"},
-                    "response_format": "Array of user objects"
-                },
-                {
-                    "endpoint": "/api/users/{id}",
-                    "method": "GET", 
-                    "description": "Get specific user by ID",
-                    "parameters": {"id": "user_id"},
-                    "response_format": "User object"
-                },
-                {
-                    "endpoint": "/api/users",
-                    "method": "POST",
-                    "description": "Create new user account",
-                    "parameters": {"name": "string", "email": "string", "password": "string"},
-                    "response_format": "Created user object with ID"
-                }
+            'Browse': [
+                {'endpoint': '/api/items', 'method': 'GET', 'resource': 'items'},
+                {'endpoint': '/api/products', 'method': 'GET', 'resource': 'products'},
+                {'endpoint': '/api/documents', 'method': 'GET', 'resource': 'documents'},
+                {'endpoint': '/api/users', 'method': 'GET', 'resource': 'users'},
             ],
-            
-            "content_management": [
-                {
-                    "endpoint": "/api/posts",
-                    "method": "GET",
-                    "description": "Retrieve blog posts or articles",
-                    "parameters": {"category": "string", "limit": 20},
-                    "response_format": "Array of post objects"
-                },
-                {
-                    "endpoint": "/api/posts",
-                    "method": "POST",
-                    "description": "Create new blog post",
-                    "parameters": {"title": "string", "content": "string", "author_id": "string"},
-                    "response_format": "Created post object"
-                }
+            'Login': [
+                {'endpoint': '/api/auth/login', 'method': 'POST', 'resource': 'auth'},
+                {'endpoint': '/api/sessions', 'method': 'POST', 'resource': 'sessions'},
             ],
-            
-            "e_commerce": [
-                {
-                    "endpoint": "/api/products",
-                    "method": "GET",
-                    "description": "Browse product catalog",
-                    "parameters": {"category": "string", "price_range": "string"},
-                    "response_format": "Array of product objects"
-                },
-                {
-                    "endpoint": "/api/orders",
-                    "method": "POST",
-                    "description": "Place new order",
-                    "parameters": {"items": "array", "shipping_address": "object"},
-                    "response_format": "Order confirmation object"
-                }
+            'Register': [
+                {'endpoint': '/api/auth/register', 'method': 'POST', 'resource': 'auth'},
+                {'endpoint': '/api/users', 'method': 'POST', 'resource': 'users'},
             ],
-            
-            "file_management": [
-                {
-                    "endpoint": "/api/files",
-                    "method": "POST",
-                    "description": "Upload file to storage",
-                    "parameters": {"file": "binary", "folder": "string"},
-                    "response_format": "File metadata object"
-                },
-                {
-                    "endpoint": "/api/files/{id}",
-                    "method": "DELETE",
-                    "description": "Delete file by ID",
-                    "parameters": {"id": "file_id"},
-                    "response_format": "Deletion confirmation"
-                }
+            'Search': [
+                {'endpoint': '/api/search', 'method': 'POST', 'resource': 'search'},
+                {'endpoint': '/api/items/search', 'method': 'GET', 'resource': 'items'},
             ],
-            
-            "search_operations": [
-                {
-                    "endpoint": "/api/search",
-                    "method": "POST",
-                    "description": "Search across content and data",
-                    "parameters": {"query": "string", "filters": "object", "limit": 50},
-                    "response_format": "Search results with metadata"
-                }
+            'View': [
+                {'endpoint': '/api/items/{id}', 'method': 'GET', 'resource': 'items'},
+                {'endpoint': '/api/documents/{id}', 'method': 'GET', 'resource': 'documents'},
+                {'endpoint': '/api/users/{id}', 'method': 'GET', 'resource': 'users'},
+            ],
+            'Create': [
+                {'endpoint': '/api/items', 'method': 'POST', 'resource': 'items'},
+                {'endpoint': '/api/documents', 'method': 'POST', 'resource': 'documents'},
+                {'endpoint': '/api/projects', 'method': 'POST', 'resource': 'projects'},
+            ],
+            'Edit': [
+                {'endpoint': '/api/items/{id}', 'method': 'PUT', 'resource': 'items'},
+                {'endpoint': '/api/documents/{id}', 'method': 'PUT', 'resource': 'documents'},
+                {'endpoint': '/api/users/{id}', 'method': 'PATCH', 'resource': 'users'},
+            ],
+            'Save': [
+                {'endpoint': '/api/items/{id}', 'method': 'PUT', 'resource': 'items'},
+                {'endpoint': '/api/documents/{id}/save', 'method': 'POST', 'resource': 'documents'},
+                {'endpoint': '/api/drafts', 'method': 'POST', 'resource': 'drafts'},
+            ],
+            'Delete': [
+                {'endpoint': '/api/items/{id}', 'method': 'DELETE', 'resource': 'items'},
+                {'endpoint': '/api/documents/{id}', 'method': 'DELETE', 'resource': 'documents'},
+                {'endpoint': '/api/users/{id}', 'method': 'DELETE', 'resource': 'users'},
+            ],
+            'Update': [
+                {'endpoint': '/api/settings', 'method': 'PUT', 'resource': 'settings'},
+                {'endpoint': '/api/profile', 'method': 'PATCH', 'resource': 'profile'},
+                {'endpoint': '/api/preferences', 'method': 'PUT', 'resource': 'preferences'},
+            ],
+            'Confirm': [
+                {'endpoint': '/api/actions/confirm', 'method': 'POST', 'resource': 'actions'},
+                {'endpoint': '/api/transactions', 'method': 'POST', 'resource': 'transactions'},
+            ],
+            'Share': [
+                {'endpoint': '/api/shares', 'method': 'POST', 'resource': 'shares'},
+                {'endpoint': '/api/items/{id}/share', 'method': 'POST', 'resource': 'items'},
+            ],
+            'Upload': [
+                {'endpoint': '/api/files', 'method': 'POST', 'resource': 'files'},
+                {'endpoint': '/api/uploads', 'method': 'POST', 'resource': 'uploads'},
+            ],
+            'Download': [
+                {'endpoint': '/api/files/{id}/download', 'method': 'GET', 'resource': 'files'},
+                {'endpoint': '/api/exports/{id}', 'method': 'GET', 'resource': 'exports'},
             ]
         }
     
-    def _load_prompt_templates(self) -> Dict[str, Dict[str, List[str]]]:
-        """Load prompt templates for different quality levels"""
-        
+    def _build_workflow_prompts(self) -> Dict[str, List[str]]:
+        """Generate realistic user prompts for each workflow action"""
         return {
-            "user_management": {
-                "high": [
-                    "I need to {action} user information for user ID {resource}",
-                    "Please {action} a new user account with the provided details",
-                    "Can you help me {action} the user profile data including {entity}?",
-                    "I want to {action} user {entity} from the system database"
-                ],
-                "medium": [
-                    "I need to {action} some {entity} data",
-                    "Help me {action} user information",
-                    "I want to work with {entity} records"
-                ],
-                "low": [
-                    "Something about {entity}",
-                    "I need {entity}",
-                    "User stuff"
-                ]
-            },
-            
-            "content_management": {
-                "high": [
-                    "I need to {action} blog posts filtered by category and date",
-                    "Please {action} a new article with title, content, and author information",
-                    "Can you {action} all published {entity} with their metadata?"
-                ],
-                "medium": [
-                    "I want to {action} some {entity}",
-                    "Help me {action} content from the blog"
-                ],
-                "low": [
-                    "Content {action}",
-                    "{entity} things"
-                ]
-            },
-            
-            "e_commerce": {
-                "high": [
-                    "I need to {action} products from the catalog with pricing and availability",
-                    "Please {action} a new order with items, quantities, and shipping details",
-                    "Can you {action} {entity} filtered by category and price range?"
-                ],
-                "medium": [
-                    "I want to {action} {entity} from the store",
-                    "Help me {action} some products"
-                ],
-                "low": [
-                    "Shopping {action}",
-                    "{entity} buy"
-                ]
-            }
+            'Browse': [
+                "I want to see all available items",
+                "Show me the product catalog",
+                "List all documents in the system",
+                "Browse through the available options"
+            ],
+            'Login': [
+                "I need to log into my account",
+                "Authenticate me with the system",
+                "Sign in to access my data",
+                "Login with my credentials"
+            ],
+            'Search': [
+                "Find items matching my criteria",
+                "Search for specific products",
+                "Look up documents by keyword",
+                "Query the database for results"
+            ],
+            'Create': [
+                "I want to create a new item",
+                "Add a new document to the system",
+                "Start a new project",
+                "Generate a fresh entry"
+            ],
+            'Edit': [
+                "Modify the existing item",
+                "Update the document content",
+                "Change the current settings",
+                "Edit the selected record"
+            ],
+            'Save': [
+                "Save my current changes",
+                "Store the updated information",
+                "Commit the modifications",
+                "Persist the current state"
+            ],
+            'View': [
+                "Show me the details",
+                "Display the full information",
+                "View the complete record",
+                "Open the selected item"
+            ],
+            'Delete': [
+                "Remove this item permanently",
+                "Delete the selected document",
+                "Remove from the system",
+                "Permanently erase this record"
+            ],
+            'Confirm': [
+                "Confirm the action",
+                "Proceed with the operation",
+                "Validate and execute",
+                "Approve the changes"
+            ]
         }
     
-    def _load_entity_types(self) -> List[str]:
-        """Load common entity types for variation"""
-        return [
-            "users", "accounts", "profiles", "customers",
-            "posts", "articles", "content", "blogs",
-            "products", "items", "inventory", "catalog",
-            "orders", "purchases", "transactions", "sales",
-            "files", "documents", "images", "media",
-            "comments", "reviews", "feedback", "ratings"
+    def generate_workflow_sequence(self) -> Dict[str, Any]:
+        """Generate a single workflow sequence using Markov chains"""
+        sequence = []
+        current_state = 'START'
+        sequence_id = str(uuid.uuid4())
+        
+        # Determine workflow type based on first transition
+        workflow_type = self._determine_workflow_type()
+        
+        for _ in range(self.max_sequence_length):
+            if current_state == 'END' or current_state not in self.workflow_transitions:
+                break
+            
+            # Get next state using Markov chain probabilities
+            next_states = self.workflow_transitions[current_state]
+            next_state = self._weighted_choice(next_states)
+            
+            if next_state == 'END':
+                break
+            
+            # Generate API call for this state
+            if next_state in self.api_endpoints:
+                api_info = random.choice(self.api_endpoints[next_state])
+                prompt = random.choice(self.workflow_prompts.get(next_state, ["Perform action"]))
+                
+                step = {
+                    'action': next_state,
+                    'api_call': api_info['endpoint'],
+                    'method': api_info['method'],
+                    'resource': api_info['resource'],
+                    'prompt': prompt,
+                    'timestamp': datetime.now().isoformat(),
+                    'step_id': len(sequence) + 1
+                }
+                sequence.append(step)
+            
+            current_state = next_state
+            
+            # Ensure minimum sequence length
+            if len(sequence) >= self.min_sequence_length and random.random() < 0.2:
+                break
+        
+        return {
+            'sequence_id': sequence_id,
+            'workflow_type': workflow_type,
+            'sequence_data': sequence,
+            'sequence_length': len(sequence),
+            'created_at': datetime.now().isoformat()
+        }
+    
+    def _determine_workflow_type(self) -> str:
+        """Determine the type of workflow being generated"""
+        workflow_types = [
+            'content_management', 'user_authentication', 'e_commerce',
+            'file_management', 'collaboration', 'analytics', 'settings'
         ]
+        return random.choice(workflow_types)
     
-    def _load_confidence_ranges(self) -> Dict[str, Tuple[float, float]]:
-        """Load confidence score ranges for different quality levels"""
+    def _weighted_choice(self, choices: Dict[str, float]) -> str:
+        """Make a weighted random choice based on probabilities"""
+        total = sum(choices.values())
+        r = random.uniform(0, total)
+        upto = 0
+        for choice, weight in choices.items():
+            if upto + weight >= r:
+                return choice
+            upto += weight
+        return list(choices.keys())[-1]  # Fallback
+    
+    async def generate_training_sequences(self, num_sequences: int = 10000) -> List[Dict[str, Any]]:
+        """Generate large number of training sequences using Markov chains"""
+        logger.info(f"Starting generation of {num_sequences} synthetic workflow sequences")
+        
+        sequences = []
+        for i in range(num_sequences):
+            sequence = self.generate_workflow_sequence()
+            sequences.append(sequence)
+            
+            if (i + 1) % 1000 == 0:
+                logger.info(f"Generated {i + 1}/{num_sequences} sequences")
+        
+        logger.info(f"Completed generation of {len(sequences)} workflow sequences")
+        return sequences
+    
+    async def generate_positive_negative_examples(self, sequences: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Generate positive and negative training examples from sequences"""
+        training_examples = []
+        
+        for sequence in sequences:
+            sequence_data = sequence['sequence_data']
+            
+            # Generate positive examples (actual next calls)
+            for i, step in enumerate(sequence_data[:-1]):
+                next_step = sequence_data[i + 1]
+                
+                positive_example = {
+                    'sequence_id': sequence['sequence_id'],
+                    'prompt': step['prompt'],
+                    'api_call': next_step['api_call'],
+                    'method': next_step['method'],
+                    'is_positive': True,
+                    'rank': 1,
+                    'context_position': i,
+                    'features': self._extract_sequence_features(sequence_data, i)
+                }
+                training_examples.append(positive_example)
+            
+            # Generate negative examples (random sampling from other sequences)
+            num_negatives = min(3, len(sequence_data) - 1)  # 3:1 negative:positive ratio
+            for i in range(num_negatives):
+                # Random step from current sequence
+                current_step = random.choice(sequence_data[:-1])
+                
+                # Random API call from different sequence
+                other_sequence = random.choice(sequences)
+                other_step = random.choice(other_sequence['sequence_data'])
+                
+                negative_example = {
+                    'sequence_id': sequence['sequence_id'],
+                    'prompt': current_step['prompt'],
+                    'api_call': other_step['api_call'],
+                    'method': other_step['method'],
+                    'is_positive': False,
+                    'rank': random.randint(2, 5),
+                    'context_position': -1,
+                    'features': {}
+                }
+                training_examples.append(negative_example)
+        
+        logger.info(f"Generated {len(training_examples)} training examples (positive + negative)")
+        return training_examples
+    
+    def _extract_sequence_features(self, sequence: List[Dict[str, Any]], position: int) -> Dict[str, Any]:
+        """Extract basic features from sequence context"""
+        if position == 0:
+            return {'is_first_step': True}
+        
+        previous_step = sequence[position - 1]
         return {
-            "high": (0.75, 0.95),
-            "medium": (0.4, 0.75),
-            "low": (0.1, 0.4)
+            'previous_action': previous_step['action'],
+            'previous_resource': previous_step['resource'],
+            'previous_method': previous_step['method'],
+            'position_in_sequence': position,
+            'sequence_progress': position / len(sequence)
         }
+
+
+class SyntheticDataGenerator:
+    """
+    Main generator class for Phase 3 ML Layer synthetic data
+    """
     
-    def save_dataset_to_file(
-        self,
-        dataset: List[Dict[str, Any]],
-        filename: str = "training_data.json"
-    ) -> str:
-        """Save generated dataset to JSON file"""
-        
-        filepath = f"data/training_data/{filename}"
-        
-        try:
-            with open(filepath, 'w') as f:
-                json.dump({
-                    "metadata": {
-                        "generated_at": datetime.utcnow().isoformat(),
-                        "total_samples": len(dataset),
-                        "generator_version": "1.0.0"
-                    },
-                    "samples": dataset
-                }, f, indent=2)
-            
-            logger.info(f"Saved {len(dataset)} training samples to {filepath}")
-            return filepath
-            
-        except Exception as e:
-            logger.error(f"Failed to save dataset: {str(e)}")
-            raise
+    def __init__(self):
+        self.markov_generator = MarkovChainGenerator()
+        self.db_manager = db_manager
     
-    def generate_and_save_dataset(
-        self,
-        num_samples: int = 2000,
-        filename: str = None
-    ) -> str:
-        """Generate and save complete training dataset"""
+    async def generate_and_store_sequences(self, num_sequences: int = 10000) -> Dict[str, Any]:
+        """Generate and store 10,000 synthetic sequences in database"""
+        start_time = datetime.now()
         
-        if filename is None:
-            filename = f"training_data_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+        # Generate sequences using Markov chains
+        sequences = await self.markov_generator.generate_training_sequences(num_sequences)
         
-        dataset = self.generate_training_dataset(num_samples)
-        return self.save_dataset_to_file(dataset, filename)
+        # Store sequences in database
+        stored_count = await self.db_manager.store_synthetic_sequences(sequences)
+        
+        # Generate positive and negative training examples
+        training_examples = await self.markov_generator.generate_positive_negative_examples(sequences)
+        
+        # Store training examples
+        training_stored = await self.db_manager.store_training_data(training_examples)
+        
+        end_time = datetime.now()
+        processing_time = (end_time - start_time).total_seconds()
+        
+        stats = {
+            'sequences_generated': len(sequences),
+            'sequences_stored': stored_count,
+            'training_examples': len(training_examples),
+            'training_examples_stored': training_stored,
+            'processing_time_seconds': processing_time,
+            'average_sequence_length': sum(s['sequence_length'] for s in sequences) / len(sequences),
+            'workflow_types': list(set(s['workflow_type'] for s in sequences)),
+            'generation_timestamp': datetime.now().isoformat()
+        }
+        
+        logger.info(f"Generation complete: {stats}")
+        return stats
+    
+    async def get_generation_stats(self) -> Dict[str, Any]:
+        """Get statistics about generated data"""
+        db_stats = await self.db_manager.get_database_stats()
+        return {
+            'database_stats': db_stats,
+            'markov_chain_order': self.markov_generator.chain_order,
+            'max_sequence_length': self.markov_generator.max_sequence_length,
+            'min_sequence_length': self.markov_generator.min_sequence_length,
+            'workflow_types_available': len(self.markov_generator.workflow_transitions),
+            'api_endpoints_available': sum(len(endpoints) for endpoints in self.markov_generator.api_endpoints.values())
+        }
 
-# Convenience functions for quick data generation
-def generate_quick_dataset(num_samples: int = 1000) -> List[Dict[str, Any]]:
-    """Quick dataset generation for testing"""
+
+# Convenience functions for Phase 3 integration
+async def generate_ml_training_data(num_sequences: int = 10000) -> Dict[str, Any]:
+    """Generate ML training data for Phase 3"""
     generator = SyntheticDataGenerator()
-    return generator.generate_training_dataset(num_samples)
+    return await generator.generate_and_store_sequences(num_sequences)
 
-def create_training_data_file(num_samples: int = 2000) -> str:
-    """Create and save training data file"""
+async def get_training_data_stats() -> Dict[str, Any]:
+    """Get training data generation statistics"""
     generator = SyntheticDataGenerator()
-    return generator.generate_and_save_dataset(num_samples)
+    return await generator.get_generation_stats()
 
-# Example usage for testing
+
+# Example usage
 if __name__ == "__main__":
-    # Generate sample dataset
-    generator = SyntheticDataGenerator()
-    sample_data = generator.generate_training_dataset(10)
+    async def main():
+        # Generate 10,000 synthetic SaaS workflow sequences
+        generator = SyntheticDataGenerator()
+        stats = await generator.generate_and_store_sequences(1000)  # Use 1000 for testing
+        
+        print("Generation Stats:")
+        for key, value in stats.items():
+            print(f"  {key}: {value}")
+        
+        # Show sample sequences
+        sequences = await db_manager.get_synthetic_sequences(5)
+        print(f"\nSample sequences (first 5):")
+        for i, seq in enumerate(sequences):
+            print(f"\nSequence {i+1} ({seq['workflow_type']}):")
+            for step in seq['sequence_data'][:3]:  # Show first 3 steps
+                print(f"  - {step['action']}: {step['api_call']} ({step['method']})")
     
-    print("Sample Training Data:")
-    for i, sample in enumerate(sample_data[:3]):
-        print(f"\nSample {i+1}:")
-        print(f"Prompt: {sample['prompt']}")
-        print(f"API Call: {sample['expected_prediction']['api_call']}")
-        print(f"Confidence: {sample['expected_prediction']['confidence']:.2f}")
-        print(f"Quality: {sample['quality_label']}")
+    asyncio.run(main())

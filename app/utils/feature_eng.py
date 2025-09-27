@@ -1,433 +1,544 @@
+"""
+Feature Engineering for Phase 3 ML Layer - OpenSesame Predictor
+Implements specific ML features for LightGBM ranking model:
+- last_endpoint_type, last_resource, time_since_last, session_length
+- endpoint_type, resource_match, workflow_distance, prompt_similarity
+- action_verb_match, bigram_prob, trigram_prob
+Stores features in data/cache.db using sqlite3
+"""
+
 import re
 import json
 import asyncio
 import logging
-from typing import Dict, List, Any, Optional, Set
-from collections import Counter
 import hashlib
-from datetime import datetime
+import pickle
+from typing import Dict, List, Any, Optional, Set, Tuple
+from collections import Counter, defaultdict
+from datetime import datetime, timedelta
+from sentence_transformers import SentenceTransformer
+import numpy as np
+from difflib import SequenceMatcher
 
 from app.config import get_settings
+from app.utils.db_manager import db_manager
 
 logger = logging.getLogger(__name__)
 
 class FeatureExtractor:
     """
-    Feature extraction utility for converting user prompts and conversation history
-    into structured features for ML model training and prediction
+    Phase 3 ML Feature extractor implementing specific features for LightGBM ranking model
     """
     
     def __init__(self):
         self.settings = get_settings()
-        self.max_history_length = self.settings.max_history_length
-        self.feature_vector_size = self.settings.feature_vector_size
         
-        # Feature extraction patterns
-        self.http_methods = ["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"]
-        self.intent_keywords = self._load_intent_keywords()
-        self.api_patterns = self._load_api_patterns()
+        # Initialize sentence transformer for prompt_similarity
+        try:
+            self.sentence_model = SentenceTransformer('all-MiniLM-L6-v2')
+            logger.info("Loaded sentence-transformers model: all-MiniLM-L6-v2")
+        except Exception as e:
+            logger.warning(f"Failed to load sentence-transformers: {e}")
+            self.sentence_model = None
         
-        # Performance tracking
-        self.total_extractions = 0
-        self.total_extraction_time = 0.0
+        # N-gram language models for bigram/trigram probabilities
+        self.bigram_model = defaultdict(Counter)
+        self.trigram_model = defaultdict(Counter)
+        self._build_ngram_models()
         
-        logger.info("Initialized Feature Extractor for ML model input preparation")
+        # Common SaaS resources and actions
+        self.resources = {'users', 'items', 'documents', 'products', 'orders', 'files', 
+                         'invoices', 'projects', 'tasks', 'comments', 'settings', 'auth'}
+        self.action_verbs = {'get', 'post', 'put', 'delete', 'patch', 'create', 'update', 
+                           'retrieve', 'fetch', 'save', 'remove', 'edit', 'view', 'browse',
+                           'search', 'filter', 'sort', 'export', 'import', 'upload', 'download'}
+        
+        logger.info("Initialized Phase 3 ML Feature Extractor")
     
-    async def extract_features(
+    async def extract_ml_features(
         self,
         prompt: str,
         history: Optional[List[Dict[str, Any]]] = None,
-        additional_context: Optional[Dict[str, Any]] = None
+        candidate_api: Dict[str, Any] = None,
+        session_start_time: Optional[datetime] = None
     ) -> Dict[str, Any]:
         """
-        Extract comprehensive features from user prompt and conversation history
+        Extract ML features for LightGBM ranking model
         
         Args:
             prompt: User input prompt
-            history: Previous conversation/API call history
-            additional_context: Additional contextual information
+            history: Previous conversation/API call history  
+            candidate_api: Candidate API call being evaluated
+            session_start_time: When the session started
             
         Returns:
-            Dictionary containing extracted features for ML processing
+            Dictionary with ML features for ranking
         """
         
-        start_time = asyncio.get_event_loop().time()
-        
         try:
-            # Initialize feature dictionary
-            features = {
-                "timestamp": datetime.utcnow().isoformat(),
-                "prompt_hash": hashlib.md5(prompt.encode()).hexdigest(),
-                "feature_names": []
-            }
+            features = {}
+            current_time = datetime.now()
             
-            # Text-based features from prompt
-            text_features = await self._extract_text_features(prompt)
-            features.update(text_features)
-            features["feature_names"].extend(text_features.keys())
+            # 1. last_endpoint_type: categorical (GET, POST, PUT)
+            features['last_endpoint_type'] = self._get_last_endpoint_type(history)
             
-            # Intent and semantic features
-            intent_features = await self._extract_intent_features(prompt)
-            features.update(intent_features)
-            features["feature_names"].extend(intent_features.keys())
+            # 2. last_resource: categorical (invoices, users, etc.)
+            features['last_resource'] = self._get_last_resource(history)
             
-            # Historical pattern features
-            if history:
-                history_features = await self._extract_history_features(history)
-                features.update(history_features)
-                features["feature_names"].extend(history_features.keys())
+            # 3. time_since_last: numeric (seconds since last API call)
+            features['time_since_last'] = self._get_time_since_last(history, current_time)
             
-            # Context-based features
-            if additional_context:
-                context_features = await self._extract_context_features(additional_context)
-                features.update(context_features)
-                features["feature_names"].extend(context_features.keys())
+            # 4. session_length: numeric (total session duration in minutes)
+            features['session_length'] = self._get_session_length(session_start_time, current_time)
             
-            # API pattern recognition features
-            api_features = await self._extract_api_pattern_features(prompt, history)
-            features.update(api_features)
-            features["feature_names"].extend(api_features.keys())
+            # 5. endpoint_type: categorical (current candidate's method)
+            features['endpoint_type'] = self._get_endpoint_type(candidate_api)
             
-            # Statistical features
-            stats_features = self._extract_statistical_features(prompt, history)
-            features.update(stats_features)
-            features["feature_names"].extend(stats_features.keys())
+            # 6. resource_match: boolean (does candidate match recent resources)
+            features['resource_match'] = self._get_resource_match(candidate_api, history)
             
-            # Update performance metrics
-            end_time = asyncio.get_event_loop().time()
-            self.total_extractions += 1
-            self.total_extraction_time += (end_time - start_time)
+            # 7. workflow_distance: numeric (similarity to typical workflows)
+            features['workflow_distance'] = await self._get_workflow_distance(candidate_api, history)
             
-            features["extraction_time_ms"] = (end_time - start_time) * 1000
-            features["total_features"] = len(features["feature_names"])
+            # 8. prompt_similarity: numeric (semantic similarity using sentence-transformers)
+            features['prompt_similarity'] = await self._get_prompt_similarity(prompt, candidate_api)
             
-            logger.debug(f"Extracted {len(features['feature_names'])} features in {(end_time - start_time)*1000:.2f}ms")
+            # 9. action_verb_match: boolean (does prompt contain action verbs)
+            features['action_verb_match'] = self._get_action_verb_match(prompt, candidate_api)
+            
+            # 10. bigram_prob: numeric (bigram probability from language model)
+            features['bigram_prob'] = self._get_bigram_probability(prompt)
+            
+            # 11. trigram_prob: numeric (trigram probability from language model)
+            features['trigram_prob'] = self._get_trigram_probability(prompt)
+            
+            # Additional metadata
+            features['extraction_timestamp'] = current_time.isoformat()
+            features['prompt_hash'] = hashlib.md5(prompt.encode()).hexdigest()
             
             return features
             
         except Exception as e:
-            logger.error(f"Feature extraction error: {str(e)}")
-            return {
-                "error": str(e),
-                "timestamp": datetime.utcnow().isoformat(),
-                "feature_names": []
-            }
+            logger.error(f"ML feature extraction error: {str(e)}")
+            return self._get_fallback_features()
     
-    async def _extract_text_features(self, prompt: str) -> Dict[str, Any]:
-        """Extract basic text-based features from the prompt"""
-        
-        features = {}
-        
-        # Basic text statistics
-        features["prompt_length"] = len(prompt)
-        features["word_count"] = len(prompt.split())
-        features["sentence_count"] = len(re.split(r'[.!?]+', prompt))
-        features["character_count"] = len(prompt.replace(' ', ''))
-        
-        # Text complexity metrics
-        words = prompt.split()
-        features["avg_word_length"] = sum(len(word) for word in words) / len(words) if words else 0
-        features["unique_word_ratio"] = len(set(words)) / len(words) if words else 0
-        
-        # Punctuation and formatting
-        features["question_marks"] = prompt.count('?')
-        features["exclamation_marks"] = prompt.count('!')
-        features["uppercase_ratio"] = sum(1 for c in prompt if c.isupper()) / len(prompt) if prompt else 0
-        
-        # Technical content indicators
-        features["contains_json"] = 1 if '{' in prompt and '}' in prompt else 0
-        features["contains_url"] = 1 if re.search(r'https?://', prompt) else 0
-        features["contains_email"] = 1 if re.search(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b', prompt) else 0
-        features["contains_code"] = 1 if any(word in prompt.lower() for word in ['function', 'class', 'import', 'return']) else 0
-        
-        return features
-    
-    async def _extract_intent_features(self, prompt: str) -> Dict[str, Any]:
-        """Extract user intent and semantic features"""
-        
-        features = {}
-        prompt_lower = prompt.lower()
-        
-        # Intent classification based on keywords
-        intent_scores = {}
-        for intent, keywords in self.intent_keywords.items():
-            score = sum(1 for keyword in keywords if keyword in prompt_lower)
-            intent_scores[f"intent_{intent}"] = score / len(keywords) if keywords else 0
-        
-        features.update(intent_scores)
-        
-        # Determine primary intent
-        primary_intent = max(intent_scores.keys(), key=lambda k: intent_scores[k]) if intent_scores else "unknown"
-        features["primary_intent"] = primary_intent
-        features["intent_confidence"] = max(intent_scores.values()) if intent_scores.values() else 0.0
-        
-        # Action words detection
-        action_words = ["create", "get", "update", "delete", "list", "search", "find", "add", "remove", "modify"]
-        features["action_word_count"] = sum(1 for word in action_words if word in prompt_lower)
-        
-        # Entity extraction (simplified)
-        entities = self._extract_entities(prompt)
-        features["entity_count"] = len(entities)
-        features["entities"] = entities[:10]  # Limit to first 10 entities
-        
-        # Sentiment indicators (basic)
-        positive_words = ["good", "great", "excellent", "perfect", "awesome", "love"]
-        negative_words = ["bad", "terrible", "awful", "hate", "wrong", "error"]
-        
-        features["positive_sentiment"] = sum(1 for word in positive_words if word in prompt_lower)
-        features["negative_sentiment"] = sum(1 for word in negative_words if word in prompt_lower)
-        
-        return features
-    
-    async def _extract_history_features(self, history: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """Extract features from conversation/API call history"""
-        
-        features = {}
-        
-        # Basic history statistics
-        features["history_length"] = min(len(history), self.max_history_length)
-        features["has_history"] = 1 if history else 0
-        
+    def _get_last_endpoint_type(self, history: Optional[List[Dict[str, Any]]]) -> str:
+        """Extract the HTTP method of the last API call"""
         if not history:
-            return features
+            return 'NONE'
         
-        # Limit history to prevent feature explosion
-        recent_history = history[-self.max_history_length:]
+        for item in reversed(history):
+            if isinstance(item, dict) and 'method' in item:
+                method = item['method'].upper()
+                if method in ['GET', 'POST', 'PUT', 'DELETE', 'PATCH']:
+                    return method
         
-        # HTTP method patterns
-        methods = []
-        api_calls = []
-        for item in recent_history:
-            if isinstance(item, dict):
-                if "method" in item:
-                    methods.append(item["method"].upper())
-                if "api_call" in item:
-                    api_calls.append(item["api_call"])
-        
-        # Method distribution
-        method_counts = Counter(methods)
-        for method in self.http_methods:
-            features[f"history_{method.lower()}_count"] = method_counts.get(method, 0)
-        
-        # API call patterns
-        features["unique_api_calls"] = len(set(api_calls))
-        features["api_call_repetition"] = len(api_calls) - len(set(api_calls)) if api_calls else 0
-        
-        # Temporal patterns
-        if len(recent_history) > 1:
-            features["history_recency"] = 1.0  # Recent items weight more
-        
-        # Success/failure patterns
-        success_count = sum(1 for item in recent_history 
-                          if isinstance(item, dict) and item.get("status") == "success")
-        features["history_success_rate"] = success_count / len(recent_history) if recent_history else 0
-        
-        return features
+        return 'UNKNOWN'
     
-    async def _extract_context_features(self, context: Dict[str, Any]) -> Dict[str, Any]:
-        """Extract features from additional context"""
+    def _get_last_resource(self, history: Optional[List[Dict[str, Any]]]) -> str:
+        """Extract the resource type from the last API call"""
+        if not history:
+            return 'none'
         
-        features = {}
+        for item in reversed(history):
+            if isinstance(item, dict) and 'api_call' in item:
+                api_call = item['api_call'].lower()
+                
+                # Extract resource from API path
+                for resource in self.resources:
+                    if resource in api_call:
+                        return resource
+                
+                # Try to extract from path segments
+                path_parts = api_call.strip('/').split('/')
+                for part in path_parts:
+                    if part in self.resources:
+                        return part
+                    # Check for plural forms
+                    singular = part.rstrip('s')
+                    if singular in self.resources:
+                        return singular
         
-        # User context
-        if "user_id" in context:
-            features["has_user_id"] = 1
-        
-        if "session_id" in context:
-            features["has_session_id"] = 1
-        
-        # Request metadata
-        if "timestamp" in context:
-            features["request_with_timestamp"] = 1
-        
-        if "user_agent" in context:
-            features["has_user_agent"] = 1
-        
-        # Custom parameters
-        if "parameters" in context and isinstance(context["parameters"], dict):
-            features["custom_params_count"] = len(context["parameters"])
-        
-        return features
+        return 'unknown'
     
-    async def _extract_api_pattern_features(
-        self,
-        prompt: str,
-        history: Optional[List[Dict[str, Any]]] = None
-    ) -> Dict[str, Any]:
-        """Extract API-specific pattern features"""
+    def _get_time_since_last(self, history: Optional[List[Dict[str, Any]]], current_time: datetime) -> float:
+        """Calculate seconds since last API call"""
+        if not history:
+            return -1.0
         
-        features = {}
+        for item in reversed(history):
+            if isinstance(item, dict) and 'timestamp' in item:
+                try:
+                    last_time = datetime.fromisoformat(item['timestamp'].replace('Z', '+00:00'))
+                    time_diff = (current_time - last_time.replace(tzinfo=None)).total_seconds()
+                    return max(0.0, time_diff)
+                except (ValueError, TypeError):
+                    continue
+        
+        return -1.0
+    
+    def _get_session_length(self, session_start: Optional[datetime], current_time: datetime) -> float:
+        """Calculate session length in minutes"""
+        if not session_start:
+            return 0.0
+        
+        try:
+            duration = (current_time - session_start).total_seconds() / 60.0
+            return max(0.0, duration)
+        except (TypeError, ValueError):
+            return 0.0
+    
+    def _get_endpoint_type(self, candidate_api: Optional[Dict[str, Any]]) -> str:
+        """Get the HTTP method of the candidate API"""
+        if not candidate_api or 'method' not in candidate_api:
+            return 'UNKNOWN'
+        
+        method = candidate_api['method'].upper()
+        return method if method in ['GET', 'POST', 'PUT', 'DELETE', 'PATCH'] else 'UNKNOWN'
+    
+    def _get_resource_match(self, candidate_api: Optional[Dict[str, Any]], history: Optional[List[Dict[str, Any]]]) -> int:
+        """Check if candidate API matches recent resources (boolean as int)"""
+        if not candidate_api or not history:
+            return 0
+        
+        candidate_resource = self._extract_resource_from_api(candidate_api.get('api_call', ''))
+        recent_resources = set()
+        
+        # Check last 5 API calls for resource patterns
+        for item in list(reversed(history))[:5]:
+            if isinstance(item, dict) and 'api_call' in item:
+                resource = self._extract_resource_from_api(item['api_call'])
+                if resource != 'unknown':
+                    recent_resources.add(resource)
+        
+        return 1 if candidate_resource in recent_resources else 0
+    
+    def _extract_resource_from_api(self, api_call: str) -> str:
+        """Extract resource type from API call path"""
+        api_call = api_call.lower()
+        
+        for resource in self.resources:
+            if resource in api_call:
+                return resource
+        
+        # Try path segments
+        path_parts = api_call.strip('/').split('/')
+        for part in path_parts:
+            if part in self.resources:
+                return part
+            singular = part.rstrip('s')
+            if singular in self.resources:
+                return singular
+        
+        return 'unknown'
+    
+    async def _get_workflow_distance(self, candidate_api: Optional[Dict[str, Any]], history: Optional[List[Dict[str, Any]]]) -> float:
+        """Calculate workflow distance based on common SaaS patterns"""
+        if not candidate_api:
+            return 1.0
+        
+        candidate_method = candidate_api.get('method', '').upper()
+        candidate_resource = self._extract_resource_from_api(candidate_api.get('api_call', ''))
+        
+        # Common workflow patterns (resource, method) -> next likely (resource, method)
+        workflow_patterns = {
+            ('auth', 'POST'): [('users', 'GET'), ('items', 'GET'), ('dashboard', 'GET')],
+            ('users', 'GET'): [('users', 'PUT'), ('items', 'GET'), ('settings', 'GET')],
+            ('items', 'GET'): [('items', 'PUT'), ('items', 'POST'), ('items', 'DELETE')],
+            ('items', 'POST'): [('items', 'PUT'), ('items', 'GET')],
+            ('items', 'PUT'): [('items', 'GET'), ('files', 'POST')],
+        }
+        
+        # Get recent context
+        if not history:
+            return 0.5
+        
+        recent_context = []
+        for item in list(reversed(history))[:3]:
+            if isinstance(item, dict) and 'api_call' in item and 'method' in item:
+                resource = self._extract_resource_from_api(item['api_call'])
+                method = item['method'].upper()
+                recent_context.append((resource, method))
+        
+        # Calculate distance based on workflow patterns
+        min_distance = 1.0
+        for context_item in recent_context:
+            if context_item in workflow_patterns:
+                expected_next = workflow_patterns[context_item]
+                candidate_pair = (candidate_resource, candidate_method)
+                
+                for expected in expected_next:
+                    # Calculate similarity
+                    resource_match = 1.0 if expected[0] == candidate_pair[0] else 0.0
+                    method_match = 1.0 if expected[1] == candidate_pair[1] else 0.0
+                    similarity = (resource_match + method_match) / 2.0
+                    distance = 1.0 - similarity
+                    min_distance = min(min_distance, distance)
+        
+        return min_distance
+    
+    async def _get_prompt_similarity(self, prompt: str, candidate_api: Optional[Dict[str, Any]]) -> float:
+        """Calculate semantic similarity between prompt and API using sentence-transformers"""
+        if not self.sentence_model or not candidate_api:
+            return 0.0
+        
+        try:
+            # Create text representations
+            api_text = self._api_to_text(candidate_api)
+            
+            # Get embeddings
+            prompt_embedding = self.sentence_model.encode([prompt])
+            api_embedding = self.sentence_model.encode([api_text])
+            
+            # Calculate cosine similarity
+            similarity = np.dot(prompt_embedding[0], api_embedding[0]) / (
+                np.linalg.norm(prompt_embedding[0]) * np.linalg.norm(api_embedding[0])
+            )
+            
+            return float(max(0.0, min(1.0, similarity)))
+            
+        except Exception as e:
+            logger.warning(f"Prompt similarity calculation failed: {e}")
+            return self._fallback_text_similarity(prompt, candidate_api)
+    
+    def _api_to_text(self, api: Dict[str, Any]) -> str:
+        """Convert API call to natural language text"""
+        method = api.get('method', '').lower()
+        api_call = api.get('api_call', '')
+        description = api.get('description', '')
+        
+        # Extract action and resource
+        action_map = {
+            'get': 'retrieve',
+            'post': 'create',
+            'put': 'update',
+            'delete': 'remove',
+            'patch': 'modify'
+        }
+        
+        action = action_map.get(method, method)
+        resource = self._extract_resource_from_api(api_call)
+        
+        if description:
+            return f"{action} {resource} {description}"
+        else:
+            return f"{action} {resource} from {api_call}"
+    
+    def _fallback_text_similarity(self, prompt: str, candidate_api: Optional[Dict[str, Any]]) -> float:
+        """Fallback text similarity when sentence-transformers unavailable"""
+        if not candidate_api:
+            return 0.0
+        
+        api_text = self._api_to_text(candidate_api).lower()
         prompt_lower = prompt.lower()
         
-        # REST pattern recognition
-        rest_indicators = ["api", "endpoint", "rest", "resource", "service"]
-        features["rest_pattern_score"] = sum(1 for word in rest_indicators if word in prompt_lower)
+        # Simple word overlap similarity
+        prompt_words = set(prompt_lower.split())
+        api_words = set(api_text.split())
         
-        # CRUD operation detection
-        crud_patterns = {
-            "create": ["create", "new", "add", "insert", "post"],
-            "read": ["get", "fetch", "retrieve", "read", "list", "show"],
-            "update": ["update", "modify", "edit", "change", "put", "patch"],
-            "delete": ["delete", "remove", "destroy", "drop"]
+        if not prompt_words or not api_words:
+            return 0.0
+        
+        intersection = len(prompt_words.intersection(api_words))
+        union = len(prompt_words.union(api_words))
+        
+        return intersection / union if union > 0 else 0.0
+    
+    def _get_action_verb_match(self, prompt: str, candidate_api: Optional[Dict[str, Any]]) -> int:
+        """Check if prompt contains action verbs matching the API method (boolean as int)"""
+        if not candidate_api:
+            return 0
+        
+        prompt_lower = prompt.lower()
+        method = candidate_api.get('method', '').lower()
+        
+        # Map HTTP methods to action verbs
+        method_verbs = {
+            'get': ['get', 'retrieve', 'fetch', 'show', 'view', 'browse', 'list', 'find'],
+            'post': ['create', 'add', 'new', 'insert', 'post', 'submit', 'make'],
+            'put': ['update', 'modify', 'change', 'edit', 'replace', 'put'],
+            'delete': ['delete', 'remove', 'destroy', 'erase', 'drop'],
+            'patch': ['update', 'modify', 'patch', 'change', 'edit']
         }
         
-        for operation, keywords in crud_patterns.items():
-            score = sum(1 for keyword in keywords if keyword in prompt_lower)
-            features[f"crud_{operation}_score"] = score
+        verbs = method_verbs.get(method, [])
         
-        # Authentication patterns
-        auth_keywords = ["auth", "login", "token", "key", "credential", "permission"]
-        features["auth_pattern_score"] = sum(1 for word in auth_keywords if word in prompt_lower)
+        for verb in verbs:
+            if verb in prompt_lower:
+                return 1
         
-        # Data format patterns
-        format_keywords = {
-            "json": ["json", "javascript", "object"],
-            "xml": ["xml", "soap"],
-            "csv": ["csv", "comma", "separated"],
-            "binary": ["binary", "file", "upload", "download"]
-        }
-        
-        for format_type, keywords in format_keywords.items():
-            score = sum(1 for keyword in keywords if keyword in prompt_lower)
-            features[f"format_{format_type}_score"] = score
-        
-        # URL/path patterns
-        if re.search(r'/\w+(/\w+)*', prompt):
-            features["contains_url_path"] = 1
-        else:
-            features["contains_url_path"] = 0
-        
-        # Parameter patterns
-        if re.search(r'\{[\w]+\}', prompt):  # {id} patterns
-            features["contains_path_params"] = 1
-        else:
-            features["contains_path_params"] = 0
-        
-        return features
+        return 0
     
-    def _extract_statistical_features(
-        self,
-        prompt: str,
-        history: Optional[List[Dict[str, Any]]] = None
-    ) -> Dict[str, Any]:
-        """Extract statistical features for ML processing"""
+    def _get_bigram_probability(self, prompt: str) -> float:
+        """Calculate bigram probability from language model"""
+        words = prompt.lower().split()
+        if len(words) < 2:
+            return 0.0
         
-        features = {}
+        total_prob = 0.0
+        count = 0
         
-        # Prompt complexity scores
-        words = prompt.split()
-        if words:
-            word_lengths = [len(word) for word in words]
-            features["word_length_std"] = (sum((l - sum(word_lengths)/len(word_lengths))**2 for l in word_lengths) / len(word_lengths))**0.5
-            features["word_length_max"] = max(word_lengths)
-            features["word_length_min"] = min(word_lengths)
+        for i in range(len(words) - 1):
+            w1, w2 = words[i], words[i + 1]
+            
+            if w1 in self.bigram_model:
+                total_occurrences = sum(self.bigram_model[w1].values())
+                w2_count = self.bigram_model[w1][w2]
+                prob = w2_count / total_occurrences if total_occurrences > 0 else 0.0
+                total_prob += prob
+                count += 1
         
-        # Lexical diversity
-        if words:
-            features["lexical_diversity"] = len(set(words)) / len(words)
-        
-        # Character distribution
-        char_counts = Counter(prompt.lower())
-        features["most_common_char_freq"] = max(char_counts.values()) / len(prompt) if prompt else 0
-        
-        # Numerical content
-        numbers = re.findall(r'\d+', prompt)
-        features["number_count"] = len(numbers)
-        features["avg_number_value"] = sum(int(n) for n in numbers) / len(numbers) if numbers else 0
-        
-        return features
+        return total_prob / count if count > 0 else 0.0
     
-    def _extract_entities(self, prompt: str) -> List[str]:
-        """Simple entity extraction (placeholder for NER)"""
+    def _get_trigram_probability(self, prompt: str) -> float:
+        """Calculate trigram probability from language model"""
+        words = prompt.lower().split()
+        if len(words) < 3:
+            return 0.0
         
-        # PLACEHOLDER: In production, this would use proper NER models
+        total_prob = 0.0
+        count = 0
         
-        entities = []
+        for i in range(len(words) - 2):
+            w1, w2, w3 = words[i], words[i + 1], words[i + 2]
+            bigram_key = (w1, w2)
+            
+            if bigram_key in self.trigram_model:
+                total_occurrences = sum(self.trigram_model[bigram_key].values())
+                w3_count = self.trigram_model[bigram_key][w3]
+                prob = w3_count / total_occurrences if total_occurrences > 0 else 0.0
+                total_prob += prob
+                count += 1
         
-        # Simple pattern-based entity extraction
-        # URLs
-        urls = re.findall(r'https?://[^\s]+', prompt)
-        entities.extend(urls)
-        
-        # Email addresses
-        emails = re.findall(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b', prompt)
-        entities.extend(emails)
-        
-        # Numbers
-        numbers = re.findall(r'\b\d+\b', prompt)
-        entities.extend(numbers)
-        
-        # Capitalized words (potential proper nouns)
-        proper_nouns = re.findall(r'\b[A-Z][a-z]+\b', prompt)
-        entities.extend(proper_nouns[:5])  # Limit to first 5
-        
-        return list(set(entities))  # Remove duplicates
+        return total_prob / count if count > 0 else 0.0
     
-    def _load_intent_keywords(self) -> Dict[str, List[str]]:
-        """Load keyword patterns for intent classification"""
+    def _build_ngram_models(self):
+        """Build n-gram language models from common SaaS prompts"""
+        # Common SaaS prompts for training n-gram models
+        training_prompts = [
+            "get user information from the database",
+            "create new user account with email",
+            "update user profile settings",
+            "delete user from the system",
+            "retrieve list of all items",
+            "search for products by category",
+            "add new product to inventory",
+            "modify existing order details",
+            "remove item from shopping cart",
+            "browse available documents",
+            "upload file to storage system",
+            "download document from server",
+            "share document with other users",
+            "save changes to draft",
+            "confirm transaction payment",
+            "cancel pending order",
+            "view order history details",
+            "export data to csv file",
+            "import users from spreadsheet",
+            "authenticate user credentials",
+            "logout from current session",
+            "reset password for account",
+            "verify email address",
+            "send notification message",
+            "schedule automated task",
+            "generate monthly report",
+            "analyze sales performance",
+            "filter results by date",
+            "sort items by priority",
+            "search items by keyword",
+            "update settings configuration"
+        ]
         
+        # Build bigram model
+        for prompt in training_prompts:
+            words = prompt.lower().split()
+            for i in range(len(words) - 1):
+                w1, w2 = words[i], words[i + 1]
+                self.bigram_model[w1][w2] += 1
+        
+        # Build trigram model  
+        for prompt in training_prompts:
+            words = prompt.lower().split()
+            for i in range(len(words) - 2):
+                w1, w2, w3 = words[i], words[i + 1], words[i + 2]
+                bigram_key = (w1, w2)
+                self.trigram_model[bigram_key][w3] += 1
+    
+    def _get_fallback_features(self) -> Dict[str, Any]:
+        """Return fallback features when extraction fails"""
         return {
-            "create": ["create", "new", "add", "make", "build", "generate", "insert", "post"],
-            "retrieve": ["get", "fetch", "retrieve", "find", "search", "show", "list", "read"],
-            "update": ["update", "modify", "change", "edit", "alter", "put", "patch"],
-            "delete": ["delete", "remove", "destroy", "drop", "clear", "erase"],
-            "authentication": ["login", "auth", "authenticate", "signin", "token", "credential"],
-            "search": ["search", "find", "query", "lookup", "filter", "browse"],
-            "upload": ["upload", "send", "transfer", "submit", "post", "attach"],
-            "download": ["download", "get", "fetch", "retrieve", "export", "save"],
-            "status": ["status", "health", "check", "ping", "test", "monitor"],
-            "configuration": ["config", "setting", "configure", "setup", "preference"]
+            'last_endpoint_type': 'UNKNOWN',
+            'last_resource': 'unknown',
+            'time_since_last': -1.0,
+            'session_length': 0.0,
+            'endpoint_type': 'UNKNOWN',
+            'resource_match': 0,
+            'workflow_distance': 1.0,
+            'prompt_similarity': 0.0,
+            'action_verb_match': 0,
+            'bigram_prob': 0.0,
+            'trigram_prob': 0.0,
+            'extraction_error': True
         }
     
-    def _load_api_patterns(self) -> Dict[str, List[str]]:
-        """Load common API patterns and conventions"""
-        
-        return {
-            "rest_resources": ["users", "posts", "comments", "orders", "products", "files"],
-            "rest_actions": ["list", "create", "show", "update", "destroy"],
-            "auth_endpoints": ["login", "logout", "register", "refresh", "verify"],
-            "admin_endpoints": ["admin", "dashboard", "settings", "config"],
-            "api_versions": ["v1", "v2", "api/v1", "api/v2"]
-        }
+    async def store_features(self, request_id: str, features: Dict[str, Any]) -> bool:
+        """Store extracted features in database"""
+        return await db_manager.store_features(request_id, features)
     
-    async def get_feature_importance(self) -> Dict[str, float]:
-        """Get feature importance scores (placeholder for ML model feedback)"""
+    async def batch_extract_features(
+        self, 
+        training_data: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        """Extract features for multiple training samples"""
+        results = []
         
-        # PLACEHOLDER: In production, this would be derived from trained models
-        return {
-            "prompt_length": 0.15,
-            "word_count": 0.12,
-            "intent_confidence": 0.18,
-            "crud_read_score": 0.14,
-            "crud_create_score": 0.13,
-            "history_length": 0.10,
-            "rest_pattern_score": 0.08,
-            "entity_count": 0.06,
-            "action_word_count": 0.04
-        }
-    
-    async def get_extraction_stats(self) -> Dict[str, Any]:
-        """Get feature extraction performance statistics"""
+        for i, sample in enumerate(training_data):
+            try:
+                # Create candidate API from sample
+                candidate_api = {
+                    'api_call': sample.get('api_call', ''),
+                    'method': sample.get('method', ''),
+                    'description': sample.get('description', '')
+                }
+                
+                # Extract features
+                features = await self.extract_ml_features(
+                    prompt=sample.get('prompt', ''),
+                    history=[],  # Empty history for training data
+                    candidate_api=candidate_api
+                )
+                
+                # Add sample metadata
+                features.update({
+                    'sequence_id': sample.get('sequence_id'),
+                    'is_positive': sample.get('is_positive', False),
+                    'rank': sample.get('rank', 0)
+                })
+                
+                results.append(features)
+                
+                if (i + 1) % 1000 == 0:
+                    logger.info(f"Extracted features for {i + 1}/{len(training_data)} samples")
+                
+            except Exception as e:
+                logger.error(f"Feature extraction failed for sample {i}: {e}")
+                results.append(self._get_fallback_features())
         
-        avg_extraction_time = (
-            self.total_extraction_time / self.total_extractions 
-            if self.total_extractions > 0 else 0
-        )
-        
-        return {
-            "total_extractions": self.total_extractions,
-            "average_extraction_time_s": avg_extraction_time,
-            "max_history_length": self.max_history_length,
-            "feature_vector_size": self.feature_vector_size,
-            "intent_categories": len(self.intent_keywords),
-            "api_pattern_categories": len(self.api_patterns)
-        }
+        logger.info(f"Completed feature extraction for {len(results)} samples")
+        return results
 
-# Convenience function for quick feature extraction
-async def extract_features(
+
+# Convenience functions
+async def extract_features_for_sample(
     prompt: str,
+    candidate_api: Dict[str, Any],
     history: Optional[List[Dict[str, Any]]] = None
 ) -> Dict[str, Any]:
-    """Convenience function for feature extraction"""
+    """Extract ML features for a single sample"""
     extractor = FeatureExtractor()
-    return await extractor.extract_features(prompt, history)
+    return await extractor.extract_ml_features(prompt, history, candidate_api)
+
+async def extract_features_for_training(training_data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Extract features for training data batch"""
+    extractor = FeatureExtractor()
+    return await extractor.batch_extract_features(training_data)
