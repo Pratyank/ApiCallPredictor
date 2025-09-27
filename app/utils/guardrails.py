@@ -9,6 +9,118 @@ from app.config import get_settings
 
 logger = logging.getLogger(__name__)
 
+# Phase 4: Destructive Patterns Detection
+DESTRUCTIVE_PATTERNS = {
+    'DELETE': lambda endpoint, params: True,  # All DELETE operations are potentially destructive
+    'PUT': lambda endpoint, params: 'delete' in endpoint.lower() or 'remove' in endpoint.lower(),
+    'PATCH': lambda endpoint, params: check_critical_fields(params)
+}
+
+def check_critical_fields(params: Dict[str, Any]) -> bool:
+    """
+    Check if parameters contain critical fields that could be destructive
+    
+    Args:
+        params: Dictionary of API parameters
+        
+    Returns:
+        True if critical fields are detected, False otherwise
+    """
+    if not params or not isinstance(params, dict):
+        return False
+    
+    # Critical field patterns that indicate potential destruction
+    critical_patterns = [
+        'delete', 'remove', 'drop', 'truncate', 'clear', 'destroy',
+        'purge', 'erase', 'wipe', 'reset', 'terminate', 'kill'
+    ]
+    
+    # Check parameter keys and values
+    for key, value in params.items():
+        key_lower = str(key).lower()
+        value_str = str(value).lower()
+        
+        # Check if key or value contains critical patterns
+        for pattern in critical_patterns:
+            if pattern in key_lower or pattern in value_str:
+                return True
+    
+    return False
+
+def is_safe(endpoint: str, params: Dict[str, Any] = None, prompt: str = None) -> Tuple[bool, str]:
+    """
+    Enhanced safety check for API endpoints with destructive pattern detection
+    
+    Args:
+        endpoint: API endpoint to check
+        params: Dictionary of API parameters
+        prompt: Original user prompt for intent analysis
+        
+    Returns:
+        Tuple of (is_safe, reason) where is_safe is boolean and reason is explanation
+    """
+    if not endpoint:
+        return False, "Empty endpoint provided"
+    
+    # Extract HTTP method from endpoint or assume GET
+    parts = endpoint.split(' ', 1)
+    if len(parts) == 2:
+        method, path = parts
+        method = method.upper()
+    else:
+        method = 'GET'
+        path = endpoint
+    
+    # Check destructive patterns based on HTTP method
+    if method in DESTRUCTIVE_PATTERNS:
+        pattern_checker = DESTRUCTIVE_PATTERNS[method]
+        if pattern_checker(path, params or {}):
+            return False, f"Destructive pattern detected for {method} operation"
+    
+    # Additional safety checks for specific patterns
+    
+    # Check for bulk operations
+    if any(keyword in path.lower() for keyword in ['bulk', 'batch', 'mass']):
+        if method in ['DELETE', 'PUT', 'PATCH']:
+            return False, "Bulk destructive operation detected"
+    
+    # Check for admin/system endpoints
+    if any(keyword in path.lower() for keyword in ['admin', 'system', 'root', 'config']):
+        if method in ['DELETE', 'PUT', 'PATCH']:
+            return False, "Administrative destructive operation detected"
+    
+    # Check for database-related destructive operations
+    db_destructive_patterns = ['drop', 'truncate', 'delete_all', 'clear_all']
+    if any(pattern in path.lower() for pattern in db_destructive_patterns):
+        return False, "Database destructive operation detected"
+    
+    # Prompt intent analysis if provided
+    if prompt:
+        prompt_lower = prompt.lower()
+        destructive_intents = [
+            'delete all', 'remove everything', 'clear all data', 'wipe clean',
+            'destroy', 'purge', 'reset everything', 'drop table', 'truncate'
+        ]
+        
+        for intent in destructive_intents:
+            if intent in prompt_lower:
+                return False, f"Destructive intent detected in prompt: '{intent}'"
+    
+    # Check parameter safety
+    if params:
+        # Check for wildcard parameters that could affect multiple records
+        for key, value in params.items():
+            if isinstance(value, str):
+                value_lower = value.lower()
+                if value_lower in ['*', 'all', '%', '%%'] and method in ['DELETE', 'PUT', 'PATCH']:
+                    return False, f"Wildcard parameter '{key}={value}' with destructive method"
+                
+                # Check for SQL-like destructive patterns in parameters
+                if any(pattern in value_lower for pattern in ['drop table', 'delete from', 'truncate']):
+                    return False, f"SQL destructive pattern in parameter: {key}"
+    
+    return True, "Operation appears safe"
+
 class SafetyValidator:
     """
     Safety validation and guardrails system for API prediction inputs and outputs
@@ -416,6 +528,91 @@ class SafetyValidator:
             # Add more patterns as needed
         ]
     
+    def is_safe(self, prediction: Dict[str, Any]) -> bool:
+        """
+        Determine if a single prediction is safe to return to users
+        
+        Args:
+            prediction: Dictionary containing API call prediction with fields:
+                - api_call: The API endpoint/call
+                - method: HTTP method (GET, POST, etc.)
+                - description: Human-readable description
+                - parameters: Request parameters
+                
+        Returns:
+            True if prediction is safe, False if it should be filtered out
+        """
+        try:
+            # Validate prediction structure first
+            if not self._validate_prediction_structure(prediction):
+                logger.debug("Prediction failed structure validation")
+                return False
+            
+            # Check API call security
+            api_call = prediction.get("api_call", "")
+            if not self._validate_api_call_security(api_call):
+                logger.debug(f"API call failed security check: {api_call}")
+                return False
+            
+            # Check for destructive operations
+            method = prediction.get("method", "").upper()
+            if self._is_destructive_operation(api_call, method):
+                logger.debug(f"Blocked destructive operation: {method} {api_call}")
+                return False
+            
+            # Validate parameters
+            params = prediction.get("parameters", {})
+            if not self._validate_parameters(params):
+                logger.debug("Parameters failed validation")
+                return False
+            
+            # Check description content
+            description = prediction.get("description", "")
+            if not self._validate_description_content(description):
+                logger.debug("Description content failed validation")
+                return False
+            
+            return True
+            
+        except Exception as e:
+            logger.warning(f"Safety check error for prediction: {str(e)}")
+            # Fail closed - consider unsafe on error
+            return False
+    
+    def _is_destructive_operation(self, api_call: str, method: str) -> bool:
+        """Check if an API call represents a destructive operation"""
+        
+        # Always block DELETE operations
+        if method == "DELETE":
+            return True
+        
+        # Block dangerous endpoints regardless of method
+        dangerous_patterns = [
+            r"(?i)(delete|remove|purge|drop|truncate)",
+            r"(?i)(admin|system|config)/.*/(delete|remove|destroy)",
+            r"(?i)/(shutdown|restart|reboot|reset)",
+            r"(?i)/(wipe|clear|erase)",
+            r"(?i)/debug/.*/(exec|eval|run)"
+        ]
+        
+        for pattern in dangerous_patterns:
+            if re.search(pattern, api_call):
+                return True
+        
+        # Check for destructive operations in PUT/POST to specific endpoints
+        if method in ["PUT", "POST"]:
+            destructive_endpoint_patterns = [
+                r"(?i)/.*/(delete|remove|purge)",
+                r"(?i)/admin/.*/(destroy|wipe)",
+                r"(?i)/system/.*/(reset|clear)"
+            ]
+            
+            for pattern in destructive_endpoint_patterns:
+                if re.search(pattern, api_call):
+                    return True
+        
+        return False
+
     def get_validation_stats(self) -> Dict[str, Any]:
         """Get validation statistics and metrics"""
         
@@ -462,3 +659,18 @@ def filter_predictions(predictions: List[Dict[str, Any]]) -> List[Dict[str, Any]
     if warnings:
         logger.info(f"Prediction filtering warnings: {warnings}")
     return filtered
+
+def is_prediction_safe(prediction: Dict[str, Any]) -> bool:
+    """Convenience function to check if a single prediction is safe"""
+    validator = SafetyValidator()
+    return validator.is_safe(prediction)
+
+def validate_api_safety(api_call: str, method: str, params: Dict[str, Any] = None) -> bool:
+    """Convenience function for API safety validation with destructive pattern detection"""
+    prediction = {
+        "api_call": api_call,
+        "method": method,
+        "parameters": params or {},
+        "description": f"{method} request to {api_call}"
+    }
+    return is_prediction_safe(prediction)

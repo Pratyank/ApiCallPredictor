@@ -8,14 +8,18 @@ import asyncio
 import time
 import hashlib
 import json
+import sqlite3
 from typing import List, Dict, Any, Optional
 import logging
 from datetime import datetime
+from sentence_transformers import SentenceTransformer
+import numpy as np
 
 from app.config import get_settings, db_manager
 from app.models.ai_layer import AiLayer
 from app.models.ml_ranker import MLRanker
 from app.utils.feature_eng import FeatureExtractor
+from app.utils.guardrails import SafetyValidator
 
 logger = logging.getLogger(__name__)
 
@@ -35,17 +39,361 @@ class Predictor:
         self.ml_ranker = MLRanker()
         self.feature_extractor = FeatureExtractor()
         
+        # Phase 4 Cold Start components
+        self.semantic_model = None  # Will be loaded on demand
+        self.db_path = "data/cache.db"
+        
+        # Phase 4 Safety Layer components
+        self.safety_validator = SafetyValidator()
+        
         # Prediction cache and performance tracking
         self.prediction_cache = {}
         self.total_predictions = 0
         self.total_processing_time = 0.0
         self.cache_hits = 0
+        self.safety_filtered_count = 0
         
         # ML Layer parameters
         self.k = 3  # Target number of predictions to return
         self.buffer = 2  # Additional candidates for ML ranking (k + buffer = 5 total)
         
-        logger.info("Initialized Phase 3 Predictor with AI + ML integration")
+        # Initialize cold start components
+        self._init_cold_start_db()
+        
+        logger.info("Initialized Phase 4 Predictor with AI + ML + Cold Start + Safety integration")
+    
+    def _init_cold_start_db(self):
+        """Initialize database table for popular endpoints"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            # Create popular_endpoints table if it doesn't exist
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS popular_endpoints (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    endpoint_path TEXT NOT NULL,
+                    method TEXT NOT NULL,
+                    description TEXT,
+                    usage_count INTEGER DEFAULT 0,
+                    confidence_score REAL DEFAULT 0.0,
+                    is_safe BOOLEAN DEFAULT 1,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            
+            # Check if table is empty and populate with safe default endpoints
+            cursor.execute("SELECT COUNT(*) FROM popular_endpoints")
+            if cursor.fetchone()[0] == 0:
+                default_endpoints = [
+                    ("GET", "/api/search", "Search for data or content", 100, 0.9, True),
+                    ("GET", "/api/items", "Retrieve list of items", 90, 0.8, True),
+                    ("GET", "/api/status", "Check system status", 80, 0.7, True),
+                    ("GET", "/api/health", "Health check endpoint", 75, 0.7, True),
+                    ("GET", "/api/info", "Get general information", 70, 0.6, True),
+                    ("POST", "/api/search", "Advanced search with filters", 60, 0.6, True),
+                    ("GET", "/api/version", "Get API version", 50, 0.5, True),
+                ]
+                
+                cursor.executemany("""
+                    INSERT INTO popular_endpoints (method, endpoint_path, description, usage_count, confidence_score, is_safe)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                """, default_endpoints)
+                
+                logger.info("Initialized popular_endpoints table with default safe endpoints")
+            
+            conn.commit()
+            conn.close()
+            
+        except Exception as e:
+            logger.error(f"Failed to initialize cold start database: {e}")
+    
+    def _get_semantic_model(self):
+        """Load semantic model on demand for cold start predictions"""
+        if self.semantic_model is None:
+            try:
+                self.semantic_model = SentenceTransformer('all-MiniLM-L6-v2')
+                logger.info("Loaded semantic model for cold start predictions")
+            except Exception as e:
+                logger.error(f"Failed to load semantic model: {e}")
+                self.semantic_model = None
+        return self.semantic_model
+    
+    async def cold_start_predict(
+        self, 
+        prompt: Optional[str] = None, 
+        spec: Optional[Dict[str, Any]] = None, 
+        k: int = 3
+    ) -> List[Dict[str, Any]]:
+        """
+        Cold start prediction for cases with no history
+        
+        Args:
+            prompt: User input prompt (optional)
+            spec: OpenAPI specification data (optional)
+            k: Number of predictions to return
+            
+        Returns:
+            List of predicted API calls with confidence scores
+        """
+        try:
+            # Case 1: If prompt exists, use semantic search on endpoint descriptions
+            if prompt and prompt.strip():
+                predictions = await self._semantic_search_endpoints(prompt, k)
+                if predictions:
+                    logger.info(f"Cold start: Generated {len(predictions)} predictions using semantic search")
+                    return predictions
+            
+            # Case 2: If spec provided, extract popular endpoints from spec
+            if spec:
+                predictions = await self._extract_popular_from_spec(spec, k)
+                if predictions:
+                    logger.info(f"Cold start: Generated {len(predictions)} predictions from OpenAPI spec")
+                    return predictions
+            
+            # Case 3: Fallback to k most common safe endpoints from database
+            predictions = await self._get_popular_safe_endpoints(k)
+            logger.info(f"Cold start: Generated {len(predictions)} popular safe endpoint predictions")
+            return predictions
+            
+        except Exception as e:
+            logger.error(f"Cold start prediction error: {e}")
+            return await self._get_basic_fallback_endpoints(k)
+    
+    async def _semantic_search_endpoints(self, prompt: str, k: int) -> List[Dict[str, Any]]:
+        """Use semantic search to find relevant endpoints based on prompt"""
+        try:
+            model = self._get_semantic_model()
+            if not model:
+                return []
+            
+            # Get all endpoints with descriptions from database
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            # Try to get endpoints from parsed_endpoints table first
+            cursor.execute("""
+                SELECT DISTINCT method, path, summary, description 
+                FROM parsed_endpoints 
+                WHERE description IS NOT NULL AND description != ''
+                LIMIT 100
+            """)
+            endpoints = cursor.fetchall()
+            
+            # If no endpoints in parsed_endpoints, get from popular_endpoints
+            if not endpoints:
+                cursor.execute("""
+                    SELECT method, endpoint_path, description, description
+                    FROM popular_endpoints 
+                    WHERE description IS NOT NULL AND description != ''
+                    ORDER BY usage_count DESC
+                    LIMIT 50
+                """)
+                endpoints = cursor.fetchall()
+            
+            conn.close()
+            
+            if not endpoints:
+                logger.warning("No endpoints with descriptions found for semantic search")
+                return []
+            
+            # Prepare texts for semantic comparison
+            prompt_embedding = model.encode([prompt])
+            descriptions = [f"{ep[2]} {ep[3]}" if ep[3] else ep[2] for ep in endpoints]
+            description_embeddings = model.encode(descriptions)
+            
+            # Calculate cosine similarity
+            similarities = np.dot(prompt_embedding, description_embeddings.T).flatten()
+            
+            # Get top k most similar endpoints
+            top_indices = np.argsort(similarities)[-k:][::-1]
+            
+            predictions = []
+            for i, idx in enumerate(top_indices):
+                endpoint = endpoints[idx]
+                similarity_score = float(similarities[idx])
+                
+                prediction = {
+                    "api_call": f"{endpoint[0]} {endpoint[1]}",
+                    "method": endpoint[0],
+                    "path": endpoint[1],
+                    "description": endpoint[2] or "API endpoint",
+                    "parameters": {},
+                    "confidence": min(0.9, max(0.3, similarity_score)),
+                    "cold_start_type": "semantic_search",
+                    "semantic_score": similarity_score,
+                    "model_version": "cold-start-v4.0"
+                }
+                predictions.append(prediction)
+            
+            return predictions
+            
+        except Exception as e:
+            logger.error(f"Semantic search failed: {e}")
+            return []
+    
+    async def _extract_popular_from_spec(self, spec: Dict[str, Any], k: int) -> List[Dict[str, Any]]:
+        """Extract popular/safe endpoints from OpenAPI specification"""
+        try:
+            predictions = []
+            paths = spec.get('paths', {})
+            
+            # Prioritize GET methods (safer) and common patterns
+            safe_patterns = ['get', 'search', 'list', 'status', 'health', 'info']
+            
+            for path, methods in paths.items():
+                for method, details in methods.items():
+                    if method.lower() in ['get', 'post'] and len(predictions) < k * 2:
+                        description = details.get('summary', details.get('description', 'API endpoint'))
+                        
+                        # Calculate confidence based on safety and common patterns
+                        confidence = 0.5
+                        if method.lower() == 'get':
+                            confidence += 0.2
+                        
+                        path_lower = path.lower()
+                        for pattern in safe_patterns:
+                            if pattern in path_lower or pattern in description.lower():
+                                confidence += 0.1
+                                break
+                        
+                        prediction = {
+                            "api_call": f"{method.upper()} {path}",
+                            "method": method.upper(),
+                            "path": path,
+                            "description": description,
+                            "parameters": {},
+                            "confidence": min(0.8, confidence),
+                            "cold_start_type": "openapi_spec",
+                            "model_version": "cold-start-v4.0"
+                        }
+                        predictions.append(prediction)
+            
+            # Sort by confidence and return top k
+            predictions.sort(key=lambda x: x['confidence'], reverse=True)
+            return predictions[:k]
+            
+        except Exception as e:
+            logger.error(f"OpenAPI spec extraction failed: {e}")
+            return []
+    
+    async def _get_popular_safe_endpoints(self, k: int) -> List[Dict[str, Any]]:
+        """Get k most popular safe endpoints from database"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            cursor.execute("""
+                SELECT method, endpoint_path, description, usage_count, confidence_score
+                FROM popular_endpoints 
+                WHERE is_safe = 1
+                ORDER BY usage_count DESC, confidence_score DESC
+                LIMIT ?
+            """, (k,))
+            
+            endpoints = cursor.fetchall()
+            conn.close()
+            
+            predictions = []
+            for endpoint in endpoints:
+                prediction = {
+                    "api_call": f"{endpoint[0]} {endpoint[1]}",
+                    "method": endpoint[0],
+                    "path": endpoint[1],
+                    "description": endpoint[2] or "Safe API endpoint",
+                    "parameters": {},
+                    "confidence": float(endpoint[4]) if endpoint[4] else 0.5,
+                    "cold_start_type": "popular_safe",
+                    "usage_count": endpoint[3],
+                    "model_version": "cold-start-v4.0"
+                }
+                predictions.append(prediction)
+            
+            return predictions
+            
+        except Exception as e:
+            logger.error(f"Failed to get popular safe endpoints: {e}")
+            return await self._get_basic_fallback_endpoints(k)
+    
+    async def _get_basic_fallback_endpoints(self, k: int) -> List[Dict[str, Any]]:
+        """Basic fallback endpoints when all else fails"""
+        basic_endpoints = [
+            {
+                "api_call": "GET /api/search",
+                "method": "GET",
+                "path": "/api/search",
+                "description": "Search for relevant data",
+                "parameters": {},
+                "confidence": 0.4,
+                "cold_start_type": "basic_fallback",
+                "model_version": "cold-start-v4.0"
+            },
+            {
+                "api_call": "GET /api/items",
+                "method": "GET", 
+                "path": "/api/items",
+                "description": "Retrieve list of items",
+                "parameters": {},
+                "confidence": 0.3,
+                "cold_start_type": "basic_fallback",
+                "model_version": "cold-start-v4.0"
+            },
+            {
+                "api_call": "GET /api/status",
+                "method": "GET",
+                "path": "/api/status",
+                "description": "Check system status",
+                "parameters": {},
+                "confidence": 0.2,
+                "cold_start_type": "basic_fallback",
+                "model_version": "cold-start-v4.0"
+            }
+        ]
+        
+        return basic_endpoints[:k]
+    
+    async def update_endpoint_popularity(
+        self, 
+        method: str, 
+        path: str, 
+        was_clicked: bool = True
+    ):
+        """Update endpoint popularity based on user interactions"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            # Check if endpoint exists
+            cursor.execute("""
+                SELECT id, usage_count FROM popular_endpoints 
+                WHERE method = ? AND endpoint_path = ?
+            """, (method, path))
+            
+            result = cursor.fetchone()
+            
+            if result:
+                # Update existing endpoint
+                endpoint_id, current_count = result
+                new_count = current_count + (1 if was_clicked else 0)
+                cursor.execute("""
+                    UPDATE popular_endpoints 
+                    SET usage_count = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                """, (new_count, endpoint_id))
+            else:
+                # Insert new endpoint
+                cursor.execute("""
+                    INSERT INTO popular_endpoints (method, endpoint_path, description, usage_count, confidence_score, is_safe)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                """, (method, path, f"{method} {path}", 1 if was_clicked else 0, 0.5, True))
+            
+            conn.commit()
+            conn.close()
+            logger.debug(f"Updated popularity for {method} {path}")
+            
+        except Exception as e:
+            logger.error(f"Failed to update endpoint popularity: {e}")
     
     async def predict(
         self, 
@@ -84,6 +432,57 @@ class Predictor:
                 logger.info("Returning cached ML prediction")
                 return cached_result
             
+            # Phase 4: Cold start check - use cold start if no history available
+            if not history or len(history) == 0:
+                logger.info("No history available, using cold start prediction")
+                cold_start_predictions = await self.cold_start_predict(prompt=prompt, k=k)
+                
+                if cold_start_predictions:
+                    # Apply safety filtering to cold start predictions
+                    safe_cold_start = [
+                        pred for pred in cold_start_predictions 
+                        if self.safety_validator.is_safe(pred)
+                    ]
+                    
+                    filtered_count = len(cold_start_predictions) - len(safe_cold_start)
+                    if filtered_count > 0:
+                        self.safety_filtered_count += filtered_count
+                        logger.info(f"Safety filter removed {filtered_count} unsafe cold start predictions")
+                    
+                    # Format cold start results to match standard prediction format
+                    processing_time_ms = (time.time() - start_time) * 1000
+                    result = {
+                        "predictions": safe_cold_start,
+                        "confidence_scores": [pred.get('confidence', 0.0) for pred in safe_cold_start],
+                        "processing_time_ms": processing_time_ms,
+                        "metadata": {
+                            "model_version": "v4.0-cold-start-safety",
+                            "timestamp": datetime.utcnow().isoformat(),
+                            "ai_provider": "cold_start",
+                            "ml_ranking_enabled": False,
+                            "safety_filtering_enabled": True,
+                            "cold_start_method": cold_start_predictions[0].get('cold_start_type', 'unknown') if cold_start_predictions else 'none',
+                            "candidates_generated": len(cold_start_predictions),
+                            "candidates_ranked": len(cold_start_predictions),
+                            "candidates_filtered_for_safety": len(safe_cold_start),
+                            "unsafe_candidates_removed": filtered_count,
+                            "processing_method": "cold_start_safety"
+                        }
+                    }
+                    
+                    # Cache the result
+                    await self._cache_prediction(cache_key, result)
+                    
+                    # Update metrics
+                    self.total_predictions += 1
+                    self.total_processing_time += processing_time_ms
+                    
+                    # Log prediction for analytics
+                    await self._log_prediction(prompt, len(result["predictions"]), processing_time_ms, False)
+                    
+                    logger.info(f"Generated {len(result['predictions'])} cold start predictions in {processing_time_ms:.2f}ms")
+                    return result
+            
             # Phase 2: Generate AI predictions with k+buffer candidates
             ai_candidates = k + self.buffer  # Generate 5 candidates for k=3
             ai_predictions = await self.ai_layer.generate_predictions(
@@ -96,6 +495,46 @@ class Predictor:
             logger.info(f"AI Layer generated {len(ai_predictions)} candidates")
             
             if not ai_predictions:
+                # If AI fails and no history, try cold start as final fallback
+                if not history or len(history) == 0:
+                    logger.info("AI predictions failed with no history, trying cold start fallback")
+                    cold_start_predictions = await self.cold_start_predict(prompt=prompt, k=k)
+                    if cold_start_predictions:
+                        # Apply safety filtering to cold start fallback predictions
+                        safe_fallback = [
+                            pred for pred in cold_start_predictions 
+                            if self.safety_validator.is_safe(pred)
+                        ]
+                        
+                        filtered_count = len(cold_start_predictions) - len(safe_fallback)
+                        if filtered_count > 0:
+                            self.safety_filtered_count += filtered_count
+                            logger.info(f"Safety filter removed {filtered_count} unsafe fallback predictions")
+                        
+                        processing_time_ms = (time.time() - start_time) * 1000
+                        result = {
+                            "predictions": safe_fallback,
+                            "confidence_scores": [pred.get('confidence', 0.0) for pred in safe_fallback],
+                            "processing_time_ms": processing_time_ms,
+                            "metadata": {
+                                "model_version": "v4.0-cold-start-fallback-safety",
+                                "timestamp": datetime.utcnow().isoformat(),
+                                "ai_provider": "cold_start_fallback",
+                                "ml_ranking_enabled": False,
+                                "safety_filtering_enabled": True,
+                                "cold_start_method": cold_start_predictions[0].get('cold_start_type', 'unknown') if cold_start_predictions else 'none',
+                                "candidates_generated": len(cold_start_predictions),
+                                "candidates_filtered_for_safety": len(safe_fallback),
+                                "unsafe_candidates_removed": filtered_count,
+                                "processing_method": "cold_start_fallback_safety"
+                            }
+                        }
+                        await self._cache_prediction(cache_key, result)
+                        self.total_predictions += 1
+                        self.total_processing_time += processing_time_ms
+                        await self._log_prediction(prompt, len(result["predictions"]), processing_time_ms, False)
+                        return result
+                
                 return await self._get_fallback_predictions(prompt, k)
             
             # Phase 3: ML Ranking (if enabled and model available)
@@ -122,22 +561,60 @@ class Predictor:
                 ranked_predictions = ai_predictions[:k]
                 logger.info("Using AI predictions without ML ranking")
             
-            # Format final results with Phase 3 metadata
+            # Phase 4: Safety filtering - filter k+buffer candidates and return k safe ones
+            if ranked_predictions:
+                # Apply safety filtering to ranked predictions
+                safe_predictions = [
+                    pred for pred in ranked_predictions 
+                    if self.safety_validator.is_safe(pred)
+                ]
+                
+                filtered_count = len(ranked_predictions) - len(safe_predictions)
+                if filtered_count > 0:
+                    self.safety_filtered_count += filtered_count
+                    logger.info(f"Safety filter removed {filtered_count} unsafe predictions")
+                
+                # If we have fewer than k safe predictions, try to get more from original candidates
+                if len(safe_predictions) < k and len(ai_predictions) > len(ranked_predictions):
+                    # Check remaining AI predictions for safe ones
+                    remaining_predictions = ai_predictions[len(ranked_predictions):]
+                    additional_safe = [
+                        pred for pred in remaining_predictions 
+                        if self.safety_validator.is_safe(pred)
+                    ]
+                    
+                    # Add additional safe predictions until we reach k or run out
+                    safe_predictions.extend(additional_safe[:k - len(safe_predictions)])
+                    
+                    if additional_safe:
+                        logger.info(f"Added {len(additional_safe[:k - len(safe_predictions)])} additional safe predictions from buffer")
+                
+                # Take up to k safe predictions
+                final_predictions = safe_predictions[:k]
+                
+                logger.info(f"Safety filtering: {len(ranked_predictions)} → {len(final_predictions)} safe predictions")
+            else:
+                final_predictions = []
+            
+            # Format final results with Phase 4 metadata
             processing_time_ms = (time.time() - start_time) * 1000
             result = {
-                "predictions": ranked_predictions,
-                "confidence_scores": [pred.get('confidence', 0.0) for pred in ranked_predictions],
+                "predictions": final_predictions,
+                "confidence_scores": [pred.get('confidence', 0.0) for pred in final_predictions],
                 "processing_time_ms": processing_time_ms,
                 "metadata": {
-                    "model_version": "v3.0-ml-layer",
+                    "model_version": "v4.0-safety-layer",
                     "timestamp": datetime.utcnow().isoformat(),
                     "ai_provider": await self._get_ai_provider(),
                     "ml_ranking_enabled": use_ml_ranking,
+                    "safety_filtering_enabled": True,
                     "candidates_generated": len(ai_predictions),
-                    "candidates_ranked": len(ranked_predictions),
+                    "candidates_ranked": len(ranked_predictions) if ranked_predictions else 0,
+                    "candidates_filtered_for_safety": len(final_predictions),
+                    "unsafe_candidates_removed": filtered_count if 'filtered_count' in locals() else 0,
                     "k_plus_buffer": f"{k}+{self.buffer}",
                     "ml_model_version": self.ml_ranker.training_stats.get('model_version', 'unknown'),
-                    "processing_method": "hybrid_ai_ml"
+                    "processing_method": "hybrid_ai_ml_safety"
                 }
             }
             
@@ -177,7 +654,7 @@ class Predictor:
         except Exception as e:
             logger.warning(f"Feature storage failed: {e}")
     
-    async def _generate_cache_key(
+    def _generate_cache_key(
         self, 
         prompt: str, 
         history: List[Dict[str, Any]], 
@@ -250,7 +727,7 @@ class Predictor:
                 "confidence": 0.4,
                 "ml_rank": 1,
                 "ml_ranking_score": 0.4,
-                "model_version": "fallback-v3.0"
+                "model_version": "fallback-v4.0"
             },
             {
                 "api_call": "GET /api/items",
@@ -260,7 +737,7 @@ class Predictor:
                 "confidence": 0.3,
                 "ml_rank": 2,
                 "ml_ranking_score": 0.3,
-                "model_version": "fallback-v3.0"
+                "model_version": "fallback-v4.0"
             },
             {
                 "api_call": "POST /api/data",
@@ -270,22 +747,37 @@ class Predictor:
                 "confidence": 0.2,
                 "ml_rank": 3,
                 "ml_ranking_score": 0.2,
-                "model_version": "fallback-v3.0"
+                "model_version": "fallback-v4.0"
             }
         ]
         
-        selected_predictions = fallback_predictions[:max_predictions]
+        # Apply safety filtering to fallback predictions
+        safe_fallback_predictions = [
+            pred for pred in fallback_predictions 
+            if self.safety_validator.is_safe(pred)
+        ]
+        
+        selected_predictions = safe_fallback_predictions[:max_predictions]
+        filtered_count = len(fallback_predictions) - len(safe_fallback_predictions)
+        
+        if filtered_count > 0:
+            self.safety_filtered_count += filtered_count
+            logger.info(f"Safety filter removed {filtered_count} unsafe fallback predictions")
         
         return {
             "predictions": selected_predictions,
             "confidence_scores": [pred["confidence"] for pred in selected_predictions],
             "processing_time_ms": 1.0,
             "metadata": {
-                "model_version": "fallback-v3.0",
+                "model_version": "fallback-v4.0-safety",
                 "timestamp": datetime.utcnow().isoformat(),
                 "is_fallback": True,
                 "ml_ranking_enabled": False,
-                "processing_method": "fallback"
+                "safety_filtering_enabled": True,
+                "candidates_generated": len(fallback_predictions),
+                "candidates_filtered_for_safety": len(selected_predictions),
+                "unsafe_candidates_removed": filtered_count,
+                "processing_method": "fallback_safety"
             }
         }
     
@@ -329,22 +821,72 @@ class Predictor:
         # Get ML model metrics
         ml_model_info = await self.ml_ranker.get_model_info()
         
+        # Get cold start metrics
+        cold_start_metrics = await self._get_cold_start_metrics()
+        
+        safety_filter_rate = (
+            self.safety_filtered_count / self.total_predictions 
+            if self.total_predictions > 0 else 0
+        )
+        
         return {
             "predictor_metrics": {
                 "total_predictions": self.total_predictions,
                 "average_processing_time_ms": avg_processing_time,
                 "cache_hit_rate": cache_hit_rate,
-                "cache_size": len(self.prediction_cache)
+                "cache_size": len(self.prediction_cache),
+                "safety_filtered_count": self.safety_filtered_count,
+                "safety_filter_rate": safety_filter_rate
             },
             "ml_layer_metrics": ml_model_info,
             "ai_layer_metrics": await self.ai_layer.get_status(),
+            "cold_start_metrics": cold_start_metrics,
+            "safety_layer_metrics": self.safety_validator.get_validation_stats(),
             "configuration": {
                 "k": self.k,
                 "buffer": self.buffer,
                 "k_plus_buffer": self.k + self.buffer,
-                "version": "v3.0-ml-layer"
+                "safety_filtering_enabled": True,
+                "version": "v4.0-safety-layer"
             }
         }
+    
+    async def _get_cold_start_metrics(self) -> Dict[str, Any]:
+        """Get cold start specific metrics"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            # Get popular endpoints statistics
+            cursor.execute("""
+                SELECT 
+                    COUNT(*) as total_endpoints,
+                    COUNT(CASE WHEN is_safe = 1 THEN 1 END) as safe_endpoints,
+                    AVG(usage_count) as avg_usage_count,
+                    MAX(usage_count) as max_usage_count,
+                    COUNT(CASE WHEN description IS NOT NULL AND description != '' THEN 1 END) as endpoints_with_descriptions
+                FROM popular_endpoints
+            """)
+            
+            stats = cursor.fetchone()
+            conn.close()
+            
+            return {
+                "total_endpoints": stats[0] if stats else 0,
+                "safe_endpoints": stats[1] if stats else 0,
+                "avg_usage_count": float(stats[2]) if stats and stats[2] else 0.0,
+                "max_usage_count": stats[3] if stats else 0,
+                "endpoints_with_descriptions": stats[4] if stats else 0,
+                "semantic_model_loaded": self.semantic_model is not None,
+                "semantic_model_type": "all-MiniLM-L6-v2" if self.semantic_model else None
+            }
+            
+        except Exception as e:
+            logger.error(f"Failed to get cold start metrics: {e}")
+            return {
+                "error": str(e),
+                "semantic_model_loaded": self.semantic_model is not None
+            }
     
     async def train_ml_model(self) -> Dict[str, Any]:
         """Train or retrain the ML ranking model"""
@@ -393,6 +935,32 @@ class Predictor:
             health["database_stats"] = db_stats
         except Exception as e:
             health["components"]["database"] = f"error: {str(e)}"
+            health["status"] = "degraded"
+        
+        # Check Cold Start components
+        try:
+            # Check semantic model availability
+            model_status = "not_loaded"
+            if self.semantic_model is not None:
+                model_status = "loaded"
+            elif self._get_semantic_model() is not None:
+                model_status = "available"
+            
+            # Check popular endpoints table
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute("SELECT COUNT(*) FROM popular_endpoints")
+            endpoint_count = cursor.fetchone()[0]
+            conn.close()
+            
+            health["components"]["cold_start"] = {
+                "status": "operational",
+                "semantic_model": model_status,
+                "popular_endpoints_count": endpoint_count
+            }
+            
+        except Exception as e:
+            health["components"]["cold_start"] = f"error: {str(e)}"
             health["status"] = "degraded"
         
         return health

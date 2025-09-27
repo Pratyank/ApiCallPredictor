@@ -43,17 +43,17 @@ class PredictionResponse(BaseModel):
 
 @app.get("/")
 async def root():
-    """Root endpoint with Phase 3 ML Layer information"""
+    """Root endpoint with Phase 4 Safety Layer information"""
     return {
-        "message": "OpenSesame Predictor API is running - Phase 3 ML Layer", 
-        "version": "v3.0-ml-layer",
-        "phase": "Phase 3 - ML Layer with LightGBM ranking",
-        "features": ["AI + ML hybrid predictions", "LightGBM ranking", "Feature engineering", "Markov chain training data"]
+        "message": "OpenSesame Predictor API is running - Phase 4 Safety Layer", 
+        "version": "v4.0-safety-layer",
+        "phase": "Phase 4 - Safety Layer with guardrails filtering",
+        "features": ["AI + ML + Safety hybrid predictions", "LightGBM ranking", "Safety guardrails", "Cold start predictions", "Feature engineering"]
     }
 
 @app.get("/health")
 async def health_check():
-    """Comprehensive Phase 3 ML health check endpoint"""
+    """Comprehensive Phase 4 Safety Layer health check endpoint"""
     try:
         predictor = await get_predictor()
         health = await predictor.health_check()
@@ -62,16 +62,16 @@ async def health_check():
         logger.error(f"Health check error: {str(e)}")
         return {
             "status": "unhealthy",
-            "service": "opensesame-predictor-ml",
-            "version": "v3.0-ml-layer",
+            "service": "opensesame-predictor-safety",
+            "version": "v4.0-safety-layer",
             "error": str(e)
         }
 
 @app.post("/predict", response_model=PredictionResponse)
 async def predict_api_calls(request: PredictionRequest):
     """
-    Phase 3 ML prediction endpoint that uses integrated AI + ML ranking
-    Returns ML-ranked API calls with confidence scores and enhanced metadata
+    Phase 4 Safety Layer prediction endpoint that uses integrated AI + ML + Safety filtering
+    Returns safety-filtered, ML-ranked API calls with confidence scores and enhanced metadata
     """
     try:
         # Validate input safety
@@ -79,12 +79,12 @@ async def predict_api_calls(request: PredictionRequest):
             raise HTTPException(status_code=400, detail="Input failed safety validation")
         
         # Log request (without sensitive data)
-        logger.info(f"Processing Phase 3 ML prediction request with prompt length: {len(request.prompt)}")
+        logger.info(f"Processing Phase 4 Safety prediction request with prompt length: {len(request.prompt)}")
         
-        # Generate predictions using the integrated Predictor (AI + ML)
+        # Generate predictions using the integrated Predictor (AI + ML + Safety)
         predictor = await get_predictor()
         
-        # Generate ML-ranked predictions
+        # Generate safety-filtered, ML-ranked predictions
         result = await predictor.predict(
             prompt=request.prompt,
             history=request.history,
@@ -101,12 +101,12 @@ async def predict_api_calls(request: PredictionRequest):
         )
         
     except Exception as e:
-        logger.error(f"Phase 3 ML prediction error: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"ML prediction failed: {str(e)}")
+        logger.error(f"Phase 4 Safety prediction error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Safety-filtered prediction failed: {str(e)}")
 
 @app.get("/metrics")
 async def get_metrics():
-    """Get comprehensive Phase 3 ML system metrics and performance stats"""
+    """Get comprehensive Phase 4 Safety Layer system metrics and performance stats"""
     try:
         predictor = await get_predictor()
         metrics = await predictor.get_metrics()
@@ -114,12 +114,12 @@ async def get_metrics():
         return {
             **metrics,
             "uptime": "placeholder_uptime",
-            "version": "v3.0-ml-layer",
-            "phase": "Phase 3 - ML Layer"
+            "version": "v4.0-safety-layer",
+            "phase": "Phase 4 - Safety Layer"
         }
     except Exception as e:
-        logger.error(f"Phase 3 metrics retrieval error: {str(e)}")
-        raise HTTPException(status_code=500, detail="ML metrics unavailable")
+        logger.error(f"Phase 4 metrics retrieval error: {str(e)}")
+        raise HTTPException(status_code=500, detail="Safety metrics unavailable")
 
 @app.post("/train")
 async def train_ml_model():
@@ -133,7 +133,8 @@ async def train_ml_model():
         return {
             "status": "training_completed",
             "training_stats": training_stats,
-            "timestamp": datetime.now().isoformat()
+            "timestamp": datetime.now().isoformat(),
+            "version": "v4.0-safety-layer"
         }
     except Exception as e:
         logger.error(f"ML model training error: {str(e)}")
