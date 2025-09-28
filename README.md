@@ -4,6 +4,58 @@
 
 OpenSesame Predictor is a sophisticated FastAPI-based service that uses advanced machine learning and large language models to predict the most relevant API calls based on natural language user prompts and conversation history.
 
+## ⚡ Quick Start
+
+Get running in under 3 commands:
+
+```bash
+# 1. Start with Docker (recommended) - includes ML training
+docker-compose up --build -d
+
+# 2. Test the prediction service
+curl -X POST http://localhost:8000/predict -H "Content-Type: application/json" \
+  -d '{"prompt": "get user information", "max_predictions": 3}'
+
+# 3. View interactive API documentation
+open http://localhost:8000/docs
+```
+
+**Requirements:** Docker & Docker Compose OR Python 3.8+ with pip  
+**Optional:** Add `ANTHROPIC_API_KEY` to `.env` for enhanced AI predictions
+
+## 🏗️ Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                           OpenSesame Predictor v5.0                             │
+│                        Performance-Optimized Architecture                        │
+└─────────────────────────────────────────────────────────────────────────────────┘
+
+┌──────────────┐    ┌──────────────────┐    ┌─────────────────┐    ┌──────────────┐
+│   FastAPI    │    │   Phase 4        │    │   Phase 2       │    │   Phase 3    │
+│   Endpoints  │───▶│   Safety Layer   │───▶│   AI Layer      │───▶│   ML Ranker  │
+│              │    │   • Input Val.   │    │   • Claude 3    │    │   • LightGBM │
+│  /predict    │    │   • Rate Limit   │    │   • OpenAI      │    │   • NDCG     │
+│  /health     │    │   • Security     │    │   • Semantic    │    │   • 11 Feat. │
+│  /metrics    │    │   • Filter       │    │   • Endpoints   │    │   • Ranking  │
+└──────────────┘    └──────────────────┘    └─────────────────┘    └──────────────┘
+        │                    │                       │                      │
+        ▼                    ▼                       ▼                      ▼
+┌──────────────────────────────────────────────────────────────────────────────────┐
+│                           Core Data Layer                                        │
+├─────────────────┬─────────────────┬─────────────────┬─────────────────┬─────────┤
+│   data/cache.db │   Embeddings    │   Endpoints     │   ML Training   │  Safety │
+│   • SQLite3     │   • Cached      │   • OpenAPI     │   • Features    │  • Logs │
+│   • 1hr TTL     │   • Similarity  │   • Semantic    │   • Synthetic   │  • Rate │
+│   • Features    │   • Fast Load   │   • Search      │   • 10K Seq.    │  • Block│
+└─────────────────┴─────────────────┴─────────────────┴─────────────────┴─────────┘
+
+┌──────────────────────────────────────────────────────────────────────────────────┐
+│                        Performance Optimizations                                 │
+│  Phase 5: Async Parallel • LLM <500ms • ML <100ms • Total <800ms • >80% Cache   │
+└──────────────────────────────────────────────────────────────────────────────────┘
+```
+
 ## 🚀 Features
 
 ### Core Capabilities
@@ -23,7 +75,7 @@ OpenSesame Predictor is a sophisticated FastAPI-based service that uses advanced
 - **Cold Start Intelligence**: Phase 4 Zero-history prediction capabilities
 - **Performance Optimization**: Phase 5 Sub-500ms response times with comprehensive benchmarking
 - **Semantic Similarity**: sentence-transformers (all-MiniLM-L6-v2) for endpoint matching
-- **Smart Caching**: Enhanced SQLite caching with parsed endpoint storage in data/cache.db
+- **Smart Caching**: Enhanced SQLite3 caching with parsed endpoint storage in data/cache.db
 - **Context Processing**: Recent event analysis with workflow pattern recognition
 - **Candidate Generation**: k+buffer logic for improved prediction quality
 - **FastAPI Framework**: High-performance async API with automatic documentation
@@ -238,7 +290,7 @@ Content-Type: application/json
 8. **Result Synthesis**: Formatted predictions with comprehensive metadata
 
 ### Enhanced Caching Strategy
-- **Endpoint Cache**: Parsed OpenAPI endpoints stored in data/cache.db with semantic indexing
+- **Endpoint Cache**: Parsed OpenAPI endpoints stored in data/cache.db with sqlite3 semantic indexing
 - **Specification Cache**: 1-hour TTL caching for raw OpenAPI specs
 - **Embedding Cache**: Computed embeddings for frequent endpoints (future enhancement)
 - **Cache Invalidation**: Intelligent TTL-based expiration with cleanup utilities
@@ -1256,7 +1308,7 @@ python tests/perf_test.py
 - Cache warming strategies for common patterns
 
 **Database Performance:**
-- SQLite optimization with indexed queries for endpoint lookup
+- SQLite3 optimization with indexed queries for endpoint lookup using data/cache.db
 - Connection pooling for concurrent access
 - Prepared statements for repeated feature extraction queries
 - Database vacuum and optimization scheduling
