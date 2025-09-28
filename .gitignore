@@ -29,3 +29,9 @@ coordination/orchestration/*
 claude-flow
 # Removed Windows wrapper files per user request
 hive-mind-prompt-*.txt
+
+# Cost-Aware Router working files (now organized in proper directories)
+# These patterns ignore any accidentally created files in root ONLY
+/COST_ROUTER_*
+/DOCKER_TEST_COMMANDS.sh
+/validate_cost_router.py

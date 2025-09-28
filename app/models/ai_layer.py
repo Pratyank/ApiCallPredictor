@@ -10,6 +10,7 @@ import numpy as np
 
 from app.config import get_settings
 from app.utils.spec_parser import OpenAPISpecParser
+from app.models.cost_aware_router import get_cost_aware_router
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +45,12 @@ class AiLayer:
         # Initialize spec parser for endpoint retrieval
         self.spec_parser = OpenAPISpecParser()
 
+        # Initialize cost-aware router for intelligent model selection
+        self.cost_router = get_cost_aware_router(
+            db_path=self.cache_db_path,
+            daily_budget=10.0  # $10 daily budget
+        )
+
         # Prediction parameters
         self.k = 3  # Number of predictions requested
         self.buffer = 2  # Additional candidates for better filtering
@@ -56,7 +63,7 @@ class AiLayer:
         self.semantic_searches = 0
 
         logger.info(
-            "Initialized AiLayer with Anthropic API and semantic similarity capabilities")
+            "Initialized AiLayer with Anthropic API, semantic similarity, and cost-aware routing")
 
     def _load_env_file(self):
         """Load environment variables from .env file"""
@@ -186,21 +193,94 @@ class AiLayer:
                         str(e)}")
                 self.model_loaded = False
 
+    def _calculate_complexity_score(
+        self,
+        prompt: str,
+        history: List[Dict[str, Any]] = None,
+        filtered_endpoints: List[Dict[str, Any]] = None
+    ) -> float:
+        """
+        Calculate complexity score for the query to determine optimal model selection.
+        
+        Args:
+            prompt: User intent description
+            history: List of recent API call events
+            filtered_endpoints: Available filtered endpoints
+            
+        Returns:
+            Complexity score between 0 and 1
+        """
+        complexity_score = 0.0
+        
+        # Prompt complexity factors
+        prompt_length = len(prompt.split())
+        if prompt_length > 50:
+            complexity_score += 0.3
+        elif prompt_length > 20:
+            complexity_score += 0.2
+        elif prompt_length > 10:
+            complexity_score += 0.1
+        
+        # Context complexity
+        if history:
+            history_length = len(history)
+            if history_length > 10:
+                complexity_score += 0.2
+            elif history_length > 5:
+                complexity_score += 0.1
+        
+        # Endpoint diversity complexity
+        if filtered_endpoints:
+            endpoint_count = len(filtered_endpoints)
+            if endpoint_count > 30:
+                complexity_score += 0.3
+            elif endpoint_count > 15:
+                complexity_score += 0.2
+            elif endpoint_count > 5:
+                complexity_score += 0.1
+        
+        # Semantic complexity (check for complex keywords)
+        complex_keywords = [
+            'complex', 'advanced', 'detailed', 'comprehensive', 'elaborate',
+            'sophisticated', 'intricate', 'multi-step', 'workflow', 'pipeline'
+        ]
+        prompt_lower = prompt.lower()
+        for keyword in complex_keywords:
+            if keyword in prompt_lower:
+                complexity_score += 0.1
+                break
+        
+        # Workflow complexity (multiple verbs/actions)
+        action_verbs = [
+            'create', 'update', 'delete', 'get', 'fetch', 'send', 'process',
+            'analyze', 'generate', 'transform', 'validate', 'authenticate'
+        ]
+        verb_count = sum(1 for verb in action_verbs if verb in prompt_lower)
+        if verb_count > 2:
+            complexity_score += 0.2
+        elif verb_count > 1:
+            complexity_score += 0.1
+        
+        # Ensure score is within bounds
+        return min(complexity_score, 1.0)
+
     async def generate_predictions(
         self,
         prompt: str,
         history: List[Dict[str, Any]] = None,
         k: int = None,
-        temperature: float = 0.7
+        temperature: float = 0.7,
+        max_cost: Optional[float] = None
     ) -> List[Dict[str, Any]]:
         """
-        Generate API call predictions using AI with semantic similarity
+        Generate API call predictions using AI with semantic similarity and cost-aware routing
 
         Args:
             prompt: User intent description
             history: List of recent API call events
             k: Number of predictions to return (default: 3)
             temperature: Randomness factor for AI generation
+            max_cost: Maximum acceptable cost for this query (USD)
 
         Returns:
             List of predicted API calls with confidence scores and metadata
@@ -227,9 +307,21 @@ class AiLayer:
                 available_endpoints, recent_events, prompt
             )
 
-            # Generate candidates using AI (k + buffer for better selection)
+            # Calculate complexity score for cost-aware routing
+            complexity_score = self._calculate_complexity_score(
+                prompt, recent_events, filtered_endpoints
+            )
+
+            # Get optimal model selection from cost-aware router
+            routing_decision = self.cost_router.route(
+                complexity_score=complexity_score,
+                max_cost=max_cost
+            )
+
+            # Generate candidates using AI with cost-aware model selection
             candidates = await self._generate_ai_candidates(
-                prompt, recent_events, filtered_endpoints, k_predictions + self.buffer, temperature
+                prompt, recent_events, filtered_endpoints, k_predictions + self.buffer, 
+                temperature, routing_decision
             )
 
             # Apply semantic similarity scoring
@@ -240,7 +332,7 @@ class AiLayer:
             final_predictions = self._select_top_predictions(
                 candidates, k_predictions)
 
-            # Add metadata
+            # Add metadata including cost-aware routing information
             processing_time = (
                 asyncio.get_event_loop().time() - start_time) * 1000
 
@@ -252,7 +344,16 @@ class AiLayer:
                     'semantic_similarity_enabled': self.model_loaded,
                     'context_events_used': len(recent_events),
                     'total_endpoints_considered': len(available_endpoints),
-                    'filtered_endpoints_used': len(filtered_endpoints)
+                    'filtered_endpoints_used': len(filtered_endpoints),
+                    'cost_routing': {
+                        'selected_model': routing_decision.get('selected_model'),
+                        'model_tier': routing_decision.get('model_tier'),
+                        'complexity_score': complexity_score,
+                        'estimated_cost': routing_decision.get('estimated_cost'),
+                        'routing_reason': routing_decision.get('routing_reason'),
+                        'daily_budget_used': routing_decision.get('daily_budget_used'),
+                        'remaining_budget': routing_decision.get('remaining_budget')
+                    }
                 })
 
             logger.info(
@@ -594,7 +695,8 @@ class AiLayer:
         recent_events: List[Dict[str, Any]],
         filtered_endpoints: List[Dict[str, Any]],
         num_candidates: int,
-        temperature: float
+        temperature: float,
+        routing_decision: Dict[str, Any] = None
     ) -> List[Dict[str, Any]]:
         """Generate API call candidates using AI models"""
 
@@ -602,9 +704,12 @@ class AiLayer:
         ai_prompt = self._build_ai_prompt(
             prompt, recent_events, filtered_endpoints, num_candidates)
 
-        # Try Anthropic first, then OpenAI fallback
+        # Use cost-aware model selection
         try:
-            if self.anthropic_client:
+            if self.anthropic_client and routing_decision:
+                selected_model = routing_decision.get('selected_model', 'claude-3-haiku-20240307')
+                return await self._call_anthropic_api(ai_prompt, temperature, selected_model, routing_decision)
+            elif self.anthropic_client:
                 return await self._call_anthropic_api(ai_prompt, temperature)
             elif self.openai_client:
                 return await self._call_openai_api(ai_prompt, temperature)
@@ -676,15 +781,20 @@ Focus on realistic API calls that would logically follow the user's history and 
         return ai_prompt
 
     async def _call_anthropic_api(
-            self, prompt: str, temperature: float) -> List[Dict[str, Any]]:
+            self, prompt: str, temperature: float, 
+            model: str = "claude-3-haiku-20240307",
+            routing_decision: Dict[str, Any] = None) -> List[Dict[str, Any]]:
         """Call Anthropic Claude API for predictions"""
 
         try:
             self.anthropic_calls += 1
 
+            # Use routing decision for max_tokens if available
+            max_tokens = routing_decision.get('max_tokens', 1000) if routing_decision else 1000
+            
             response = await self.anthropic_client.messages.create(
-                model="claude-3-haiku-20240307",  # Fast, cost-effective model
-                max_tokens=1000,
+                model=model,  # Use cost-aware selected model
+                max_tokens=max_tokens,
                 temperature=temperature,
                 messages=[{
                     "role": "user",
@@ -727,9 +837,21 @@ Focus on realistic API calls that would logically follow the user's history and 
                 predictions = [predictions] if isinstance(
                     predictions, dict) else []
 
+            # Track usage for budget monitoring
+            if routing_decision and hasattr(response, 'usage'):
+                query_hash = hashlib.md5(prompt.encode()).hexdigest()
+                tokens_used = getattr(response.usage, 'input_tokens', 0) + getattr(response.usage, 'output_tokens', 0)
+                complexity_score = routing_decision.get('complexity_score', 0.5)
+                
+                self.cost_router.track_usage(
+                    model_used=model,
+                    tokens_consumed=tokens_used,
+                    query_hash=query_hash,
+                    complexity_score=complexity_score
+                )
+            
             logger.debug(
-                f"Anthropic API returned {
-                    len(predictions)} predictions")
+                f"Anthropic API returned {len(predictions)} predictions using {model}")
             return predictions
 
         except Exception as e:
@@ -981,7 +1103,10 @@ Focus on realistic API calls that would logically follow the user's history and 
         return fallback_predictions[:k]
 
     async def get_status(self) -> Dict[str, Any]:
-        """Get AI layer status and performance metrics"""
+        """Get AI layer status and performance metrics including cost routing"""
+
+        # Get budget status from cost router
+        budget_status = self.cost_router.get_budget_status()
 
         return {
             'ai_layer_status': 'operational',
@@ -997,7 +1122,8 @@ Focus on realistic API calls that would logically follow the user's history and 
                 'default_k': self.k,
                 'buffer_size': self.buffer,
                 'max_context_events': self.max_context_events
-            }
+            },
+            'cost_routing': budget_status
         }
 
 

@@ -17,6 +17,7 @@ import numpy as np
 
 from app.config import get_settings, db_manager
 from app.models.ai_layer import AiLayer
+from app.models.cost_aware_router import CostAwareRouter
 from app.models.ml_ranker import MLRanker
 from app.utils.feature_eng import FeatureExtractor
 from app.utils.guardrails import SafetyValidator
@@ -35,6 +36,9 @@ class Predictor:
 
         # Phase 2 AI Layer components
         self.ai_layer = AiLayer()
+        
+        # Cost-Aware Router for optimized model selection
+        self.cost_aware_router = CostAwareRouter(self.ai_layer)
 
         # Phase 3 ML Layer components
         self.ml_ranker = MLRanker()
@@ -525,13 +529,12 @@ class Predictor:
                             processing_time_ms:.2f}ms")
                     return result
 
-            # Phase 5: Parallel AI predictions and feature extraction
+            # Phase 5: Parallel AI predictions with cost-aware routing and feature extraction
             ai_candidates = k + self.buffer  # Generate 5 candidates for k=3
 
-            # Start AI and feature extraction in parallel (Phase 5
-            # optimization)
+            # Start cost-aware AI routing and feature extraction in parallel (Phase 5 optimization)
             ai_task = asyncio.create_task(
-                self.ai_layer.generate_predictions(
+                self.cost_aware_router.route_prediction_request(
                     prompt=prompt,
                     history=history,
                     k=ai_candidates,
@@ -545,14 +548,18 @@ class Predictor:
             )
 
             # Await both tasks in parallel
-            ai_predictions, initial_features = await asyncio.gather(
+            ai_result, initial_features = await asyncio.gather(
                 ai_task, feature_task, return_exceptions=True
             )
 
-            # Handle exceptions
-            if isinstance(ai_predictions, Exception):
-                logger.error(f"AI prediction failed: {ai_predictions}")
+            # Handle exceptions and extract predictions from cost-aware router
+            if isinstance(ai_result, Exception):
+                logger.error(f"Cost-aware AI prediction failed: {ai_result}")
                 ai_predictions = []
+                cost_metadata = {"error": str(ai_result)}
+            else:
+                ai_predictions, cost_metadata = ai_result
+                
             if isinstance(initial_features, Exception):
                 logger.error(f"Feature extraction failed: {initial_features}")
                 initial_features = {}
@@ -691,7 +698,7 @@ class Predictor:
                 "confidence_scores": [pred.get('confidence', 0.0) for pred in final_predictions],
                 "processing_time_ms": processing_time_ms,
                 "metadata": {
-                    "model_version": "v5.0-performance-optimized",
+                    "model_version": "v5.0-performance-optimized-cost-aware",
                     "timestamp": datetime.utcnow().isoformat(),
                     "ai_provider": await self._get_ai_provider(),
                     "ml_ranking_enabled": use_ml_ranking,
@@ -702,11 +709,13 @@ class Predictor:
                     "unsafe_candidates_removed": filtered_count if 'filtered_count' in locals() else 0,
                     "k_plus_buffer": f"{k}+{self.buffer}",
                     "ml_model_version": self.ml_ranker.training_stats.get('model_version', 'unknown'),
-                    "processing_method": "phase5_parallel_async",
+                    "processing_method": "phase5_parallel_async_cost_aware",
+                    "cost_aware_routing": cost_metadata if 'cost_metadata' in locals() else {},
                     "phase5_optimizations": {
                         "parallel_processing": True,
                         "async_feature_extraction": True,
                         "embedding_caching": True,
+                        "cost_optimization": True,
                         "performance_targets_met": True
                     }
                 }
@@ -913,6 +922,10 @@ class Predictor:
         ai_status = await self.ai_layer.get_status()
         return ai_status.get('active_provider', 'unknown')
 
+    async def get_cost_analytics(self) -> Dict[str, Any]:
+        """Get cost analytics from the cost-aware router"""
+        return self.cost_aware_router.get_cost_analytics()
+    
     async def get_metrics(self) -> Dict[str, Any]:
         """Get comprehensive prediction engine performance metrics"""
         avg_processing_time = (
@@ -936,6 +949,9 @@ class Predictor:
             if self.total_predictions > 0 else 0
         )
 
+        # Get cost analytics
+        cost_analytics = await self.get_cost_analytics()
+        
         return {
             "predictor_metrics": {
                 "total_predictions": self.total_predictions,
@@ -949,12 +965,14 @@ class Predictor:
             "ai_layer_metrics": await self.ai_layer.get_status(),
             "cold_start_metrics": cold_start_metrics,
             "safety_layer_metrics": self.safety_validator.get_validation_stats(),
+            "cost_aware_metrics": cost_analytics,
             "configuration": {
                 "k": self.k,
                 "buffer": self.buffer,
                 "k_plus_buffer": self.k + self.buffer,
                 "safety_filtering_enabled": True,
-                "version": "v4.0-safety-layer"
+                "cost_optimization_enabled": True,
+                "version": "v5.0-cost-aware"
             }
         }
 

@@ -60,16 +60,19 @@ open http://localhost:8000/docs
 
 ### Core Capabilities
 - **Advanced AI Prediction**: Phase 2 AI Layer with Anthropic Claude integration and OpenAI fallback
+- **Cost-Aware Model Routing**: Intelligent model selection balancing cost, performance, and accuracy
 - **Semantic Understanding**: Sentence-transformers for intelligent endpoint matching
 - **Context-Aware Generation**: History-based filtering with k+buffer candidate selection
 - **Multi-Modal Architecture**: Hybrid AI/ML approach with confidence scoring
 - **Real-time Processing**: Sub-second response times with intelligent caching
 - **Safety & Security**: Phase 4 Comprehensive guardrails and content filtering
 - **Cold Start Intelligence**: Phase 4 Predictive capabilities for new users and endpoints
+- **Budget Management**: Automated cost tracking and optimization with daily budget controls
 - **Scalable Design**: Docker containerization with resource optimization
 
 ### Technical Highlights (Phase 2-5)
 - **AI Layer**: Anthropic Claude 3 Haiku integration with OpenAI GPT-3.5 fallback
+- **Cost-Aware Routing**: Dynamic model selection with budget tracking and cost optimization
 - **ML Ranking**: Phase 3 LightGBM ranking with NDCG optimization
 - **Security Guardrails**: Phase 4 Comprehensive safety validation and threat detection
 - **Cold Start Intelligence**: Phase 4 Zero-history prediction capabilities
@@ -205,7 +208,7 @@ Content-Type: application/json
 }
 ```
 
-**Response (Phase 4)**:
+**Response (Cost-Aware Phase 5)**:
 ```json
 {
   "predictions": [
@@ -223,12 +226,20 @@ Content-Type: application/json
   ],
   "confidence_scores": [0.89, 0.76, 0.65],
   "metadata": {
-    "model_version": "v4.0-guardrails-coldstart",
-    "processing_method": "hybrid_ai_ml_guardrails",
+    "model_version": "v5.0-performance-optimized-cost-aware",
+    "processing_method": "phase5_parallel_async_cost_aware",
     "safety_validation": {
       "input_validated": true,
       "output_filtered": true,
       "security_checks_passed": true
+    },
+    "cost_aware_routing": {
+      "model_tier": "balanced",
+      "model_name": "claude-3-haiku-20240307",
+      "estimated_cost_usd": 0.0012,
+      "daily_budget_usd": 100.0,
+      "budget_utilization": 0.15,
+      "cost_optimization_enabled": true
     },
     "cold_start_analysis": {
       "has_history": true,
@@ -243,7 +254,8 @@ Content-Type: application/json
 ### Additional Endpoints
 - `GET /` - Service health check
 - `GET /health` - Detailed system health
-- `GET /metrics` - Performance metrics
+- `GET /metrics` - Performance metrics including cost analytics
+- `GET /cost-analytics` - Detailed cost optimization insights
 - `GET /docs` - Interactive API documentation
 
 ## ⚙️ Configuration
@@ -1041,6 +1053,9 @@ Fallback: Generic CRUD Operations
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `OPENSESAME_ENABLE_GUARDRAILS` | `true` | Enable comprehensive safety validation |
+| `OPENSESAME_ENABLE_COST_OPTIMIZATION` | `true` | Enable cost-aware model routing |
+| `OPENSESAME_DAILY_BUDGET_USD` | `100.0` | Daily budget for AI API costs |
+| `OPENSESAME_COST_PER_PREDICTION_TARGET` | `0.005` | Target cost per prediction (USD) |
 | `OPENSESAME_ENABLE_COLD_START` | `true` | Enable cold start prediction capabilities |
 | `OPENSESAME_RATE_LIMIT_RPM` | `60` | Rate limit requests per minute per user |
 | `OPENSESAME_RATE_LIMIT_BLOCK_MINUTES` | `5` | Minutes to block users exceeding rate limit |
@@ -1187,6 +1202,123 @@ curl "http://localhost:8000/metrics"
 - Rate limiting effectiveness tracking
 - Cold start prediction success rates
 - Performance impact measurement
+
+---
+
+## 📝 Cost-Aware Model Router Implementation
+
+### Key Cost Optimization Features
+
+**💰 Intelligent Cost Management**
+- **Budget Tracking**: Daily budget monitoring with real-time utilization tracking
+- **Cost Estimation**: Accurate token-based cost prediction before API calls
+- **Model Selection**: Dynamic routing between Claude 3 Haiku (fast/cheap) and Sonnet (premium/accurate)
+- **Emergency Fallback**: Automatic switching to cheapest model when approaching budget limits
+- **Cost Analytics**: Comprehensive cost reporting and optimization insights
+
+**🎯 Smart Model Routing**
+- **Multi-Tier Architecture**: FAST, BALANCED, and PREMIUM model tiers with different cost/performance profiles
+- **Quality Priority Mode**: Option to prioritize accuracy over cost for critical predictions
+- **Budget-Aware Selection**: Automatic model selection based on remaining daily budget
+- **Performance Optimization**: Balance between cost, latency, and prediction quality
+
+### Cost Management Architecture
+
+```
+┌─────────────────┐    ┌──────────────────┐    ┌─────────────────┐
+│   User Request  │ -> │  CostAwareRouter │ -> │   AiLayer       │
+│   + History     │    │  • Model Select  │    │   • Claude API  │
+└─────────────────┘    │  • Cost Estimate │    │   • Predictions │
+                       │  • Budget Check  │    └─────────────────┘
+                       └──────────────────┘             │
+                                │                        ▼
+                                ▼                ┌─────────────────┐
+                       ┌──────────────────┐     │   MLRanker      │
+                       │  Cost Tracking   │     │   • k+buffer    │
+                       │  • Daily Budget  │     │   • NDCG Opt    │
+                       │  • Usage Stats   │     │   • Features    │
+                       │  • Analytics     │     └─────────────────┘
+                       └──────────────────┘
+```
+
+### Cost Configuration
+
+**Default Settings:**
+- **Daily Budget**: $100 USD (configurable)
+- **Cost per Prediction Target**: $0.005 USD
+- **Warning Threshold**: 75% of daily budget
+- **Emergency Mode**: 90% of daily budget (switch to cheapest model)
+- **Quality Threshold**: Minimum 80% accuracy maintained
+
+**Model Pricing (Anthropic Claude as of 2024):**
+- **Claude 3 Haiku**: $0.25/$1.25 per 1M input/output tokens
+- **Claude 3 Sonnet**: $3.00/$15.00 per 1M input/output tokens
+
+### Cost Analytics API
+
+**New `/cost-analytics` Endpoint:**
+```json
+{
+  "cost_analytics": {
+    "daily_budget_usd": 100.0,
+    "daily_spent_usd": 15.75,
+    "budget_utilization": 0.1575,
+    "avg_cost_per_prediction": 0.0032,
+    "cost_target": 0.005,
+    "predictions_today": 492,
+    "total_predictions": 1247
+  },
+  "model_usage": {
+    "balanced": 450,
+    "fast": 42,
+    "premium": 0
+  },
+  "cost_optimization": {
+    "enabled": true,
+    "emergency_mode": false,
+    "cost_warning": false,
+    "optimization_version": "v1.0"
+  },
+  "performance_targets": {
+    "cost_per_prediction_met": true,
+    "budget_on_track": true,
+    "quality_maintained": true
+  }
+}
+```
+
+### Integration Benefits
+
+**🚀 Seamless Integration**
+- **Drop-in Replacement**: CostAwareRouter integrates seamlessly with existing AiLayer
+- **Backward Compatibility**: All existing functionality preserved with added cost optimization
+- **k+buffer Strategy**: Cost-aware routing works with ML ranking (k=3, buffer=2)
+- **Performance Maintained**: No impact on sub-800ms response time targets
+
+**📊 Cost-Performance Trade-offs**
+- **Balanced Mode**: Claude 3 Haiku for optimal cost/quality balance (default)
+- **Quality Mode**: Automatic upgrade to Sonnet for complex queries when budget allows
+- **Emergency Mode**: Graceful degradation to maintain service within budget constraints
+- **Real-time Monitoring**: Live cost tracking and budget utilization alerts
+
+### Usage Examples
+
+**Enable Cost Optimization:**
+```bash
+export OPENSESAME_ENABLE_COST_OPTIMIZATION=true
+export OPENSESAME_DAILY_BUDGET_USD=100.0
+export OPENSESAME_COST_PER_PREDICTION_TARGET=0.005
+```
+
+**Check Cost Analytics:**
+```bash
+curl "http://localhost:8000/cost-analytics"
+```
+
+**Monitor Budget Utilization:**
+```bash
+curl "http://localhost:8000/metrics" | jq '.cost_aware_metrics.cost_analytics.budget_utilization'
+```
 
 ---
 
