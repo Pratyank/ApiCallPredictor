@@ -68,3 +68,8 @@ transformers>=4.21.0  # Required by sentence-transformers
 
 # Performance and Timing
 # time is built-in Python module - no installation needed
+
+# Performance Testing Dependencies
+psutil==5.9.5                 # System resource monitoring
+matplotlib==3.7.2            # Plotting performance metrics
+memory-profiler==0.60.0      # Memory usage profiling
