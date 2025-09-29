@@ -23,6 +23,36 @@ open http://localhost:8000/docs
 **Requirements:** Docker & Docker Compose OR Python 3.8+ with pip  
 **Optional:** Add `ANTHROPIC_API_KEY` to `.env` for enhanced AI predictions
 
+## 🗄️ Database Population (Important!)
+
+**⚠️ If you get generic/fallback predictions instead of domain-specific ones, you likely need to populate the endpoint database:**
+
+### Quick Database Setup
+```bash
+# Populate with billing/invoice endpoints (most common issue)
+python scripts/quick_populate.py
+
+# OR populate with comprehensive sample APIs
+python scripts/populate_endpoints.py
+
+# Verify population worked
+sqlite3 data/cache.db "SELECT COUNT(*) FROM parsed_endpoints;"
+```
+
+### Why Database Population is Required
+
+The AI layer queries the `parsed_endpoints` table for intelligent predictions. If this table is empty, the system falls back to generic predictions with `"is_fallback": true` in the response metadata.
+
+**Symptoms of empty database:**
+- Predictions return generic endpoints like `/health`, `/users`
+- Response metadata shows `"ai_provider": "cold_start"` instead of `"anthropic"`
+- Low confidence scores and `"is_fallback": true`
+
+**After population, you should see:**
+- Domain-specific predictions like `/invoices/{id}/finalize`, `/billing/process`
+- Higher confidence scores (0.7-0.9)
+- Response metadata shows `"ai_provider": "anthropic"`
+
 ## 🏗️ Architecture
 
 ```
@@ -84,6 +114,7 @@ open http://localhost:8000/docs
 - **FastAPI Framework**: High-performance async API with automatic documentation
 - **Feature Engineering**: Advanced text analysis and pattern recognition
 - **OpenAPI Integration**: Automatic spec parsing and endpoint extraction with semantic indexing
+- **Dynamic Spec Loading**: Support for `spec_url` parameter to fetch and cache OpenAPI specs on-demand
 
 ## 📋 Project Structure
 
@@ -149,6 +180,32 @@ export OPENAI_API_KEY="your-openai-api-key-here"
 uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
+5. **Populate Database** (Required for domain-specific predictions):
+```bash
+# Choose one of these methods
+python scripts/quick_populate.py          # Fast: billing endpoints only
+python scripts/populate_endpoints.py     # Comprehensive: multiple API samples
+```
+
+### 🚨 Troubleshooting Common Issues
+
+**Issue: Getting generic predictions instead of domain-specific ones**
+```bash
+# Symptom: Response shows "ai_provider": "cold_start" and low confidence
+# Solution: Populate the parsed_endpoints table
+python scripts/quick_populate.py
+
+# Verify fix: Should return 10+ endpoints
+sqlite3 data/cache.db "SELECT COUNT(*) FROM parsed_endpoints;"
+```
+
+**Issue: No AI predictions, only rule-based fallbacks**
+```bash
+# Symptom: All predictions have very low confidence scores
+# Solution: Set your Anthropic API key
+export ANTHROPIC_API_KEY="your-key-here"
+```
+
 ### Docker Deployment
 
 #### Phase 3 ML Layer (Recommended)
@@ -183,6 +240,9 @@ asyncio.run(setup_ml())
 
 # Restart to load trained model
 docker restart opensesame-predictor
+
+# IMPORTANT: Populate endpoint database for domain-specific predictions
+docker exec opensesame-predictor python scripts/quick_populate.py
 ```
 
 #### Production Deployment
@@ -204,7 +264,8 @@ Content-Type: application/json
     {"api_call": "/api/auth/login", "method": "POST", "timestamp": "2024-01-01T10:00:00Z"}
   ],
   "max_predictions": 5,
-  "temperature": 0.7
+  "temperature": 0.7,
+  "spec_url": "https://api.example.com/openapi.json"  // Optional: OpenAPI spec URL
 }
 ```
 
@@ -257,6 +318,14 @@ Content-Type: application/json
 - `GET /metrics` - Performance metrics including cost analytics
 - `GET /cost-analytics` - Detailed cost optimization insights
 - `GET /docs` - Interactive API documentation
+
+### OpenAPI Spec Integration
+When `spec_url` is provided in the request:
+1. **Automatic Fetching**: System fetches the OpenAPI specification from the provided URL
+2. **Smart Caching**: Specs are cached with 1-hour TTL to avoid repeated fetches
+3. **Endpoint Extraction**: Parses and stores endpoints in the `parsed_endpoints` database table
+4. **Context Enhancement**: Available endpoints from the spec improve prediction accuracy
+5. **Graceful Fallback**: If spec processing fails, prediction continues with existing cached endpoints
 
 ## ⚙️ Configuration
 
@@ -621,7 +690,60 @@ curl -X POST "http://localhost:8000/predict" \
   }'
 ```
 
-6. **Check System Status**:
+6. **Test OpenAPI Spec Integration with Billing Context**:
+```bash
+curl -X POST "http://localhost:8000/predict" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "prompt": "Let'\''s finish billing for Q2",
+    "history": [
+      {
+        "method": "GET",
+        "endpoint": "/invoices",
+        "timestamp": "2024-01-15T10:00:00Z"
+      },
+      {
+        "method": "PUT",
+        "endpoint": "/invoices/123/status",
+        "timestamp": "2024-01-15T10:05:00Z"
+      }
+    ],
+    "max_predictions": 5,
+    "temperature": 0.7,
+    "spec_url": "https://github.com/stripe/openapi/blob/master/openapi/fixtures3.beta.yaml"
+  }'
+```
+
+7. **Test GitHub API Workflow**:
+```bash
+curl -X POST "http://localhost:8000/predict" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "prompt": "I need to review and merge the pending pull requests for the release",
+    "history": [
+      {
+        "method": "GET",
+        "endpoint": "/repos/myorg/myproject/pulls",
+        "timestamp": "2024-01-15T14:30:00Z"
+      },
+      {
+        "method": "GET",
+        "endpoint": "/repos/myorg/myproject/pulls/42/reviews",
+        "timestamp": "2024-01-15T14:35:00Z"
+      },
+      {
+        "method": "POST",
+        "endpoint": "/repos/myorg/myproject/pulls/42/reviews",
+        "timestamp": "2024-01-15T14:40:00Z"
+      }
+    ],
+    "max_predictions": 5,
+    "temperature": 0.7,
+    "spec_url": "https://raw.githubusercontent.com/github/rest-api-description/main/descriptions/api.github.com/api.github.com.json"
+  }'
+```
+
+8. **Check System Status**:
 ```bash
 curl "http://localhost:8000/metrics"
 ```

@@ -35,6 +35,7 @@ class PredictionRequest(BaseModel):
     history: Optional[List[Dict[str, Any]]] = []
     max_predictions: Optional[int] = 5
     temperature: Optional[float] = 0.7
+    spec_url: Optional[str] = None
 
 
 class PredictionResponse(BaseModel):
@@ -104,6 +105,19 @@ async def predict_api_calls(request: PredictionRequest):
         # Log request (without sensitive data)
         logger.info(
             f"Processing Phase 5 Performance prediction request with prompt length: {len(request.prompt)}")
+
+        # Handle spec_url if provided
+        if request.spec_url:
+            logger.info(f"Processing OpenAPI spec from URL: {request.spec_url}")
+            try:
+                from app.utils.spec_parser import OpenAPISpecParser
+                async with OpenAPISpecParser() as spec_parser:
+                    # This will fetch and cache the spec if not already cached
+                    await spec_parser.fetch_openapi_spec(request.spec_url)
+                    logger.info(f"Successfully processed OpenAPI spec from {request.spec_url}")
+            except Exception as e:
+                logger.warning(f"Failed to process OpenAPI spec from {request.spec_url}: {str(e)}")
+                # Continue with prediction even if spec processing fails
 
         # Generate predictions using the optimized Predictor (Async AI + ML +
         # Safety)
